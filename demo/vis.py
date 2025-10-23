@@ -1,5 +1,9 @@
 import argparse
 import cv2
+
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 from lib.preprocess import h36m_coco_format, revise_kpts
 # from lib.hrnet.gen_kpts import gen_video_kpts as hrnet_pose
 import os, sys
@@ -551,6 +555,41 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
     keypoints = _npz['reconstruction']                                                  # shape ~ (M=1, T, 17, 2) in pixels
     valid_mask = _npz['valid_mask'] if 'valid_mask' in _npz.files else None             # (T,) 1=person present
 
+
+    # --- Logging priority helper: choose one line per frame ---
+      # Higher number = higher priority when choosing the single line to emit
+    _STATUS_RANK = {
+            "OK": 5,
+            "SKIP:low_confidence(thresh=": 3,  # prefix match handled below
+            "SKIP:orientation_disabled": 2,
+            "SKIP:no_depth": 1,
+            "SKIP:no_person": 0,
+    }
+
+    def _status_rank(s: str) -> int:
+        if s in _STATUS_RANK:
+            return _STATUS_RANK[s]
+        # Handle dynamic notes like SKIP:low_confidence(thresh=0.50)
+        if s.startswith("SKIP:low_confidence("):
+            return _STATUS_RANK["SKIP:low_confidence(thresh="]
+        return -1
+
+    def _stage_best(best, candidate):
+        """
+            best: dict or None
+            candidate: dict with keys:
+              frame_i, has_person, t_ms, frame_id, conf, yaw_deg, quat_wxyz,
+              status, pos_xyz_m, translation_source, note
+            Returns the better (higher priority) dict.
+        """
+
+        if candidate is None:
+            return best
+        if best is None:
+            return candidate
+        br = _status_rank(best.get("status", ""))
+        cr = _status_rank(candidate.get("status", ""))
+        return candidate if cr > br else best
     # ----------------------------
     # 3) Open source (video or image)
     # ----------------------------
@@ -624,11 +663,21 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
     # 6) Frame loop (3D inference)
     # ----------------------------
 
+    # --- rolling state used by diagnostics/publish (must exist before the loop) ---
+    pos_xyz_m = None  # last known translation (meters)
+    prev_quat = None  # last known orientation quaternion (w, x, y, z)
+    has_person = False  # last detection flag
+    yaw_deg = None
+    conf = 1.0
+    trans_src = "none"
+    trans_note = ""
 
     try:
         ## 3D
         print('\nGenerating 3D pose...')
         for i in tqdm(range(video_length)):
+            best_line = None  # holds the single best PoseStamped line to emit for this frame
+            skip_rest_of_frame = False
             # -- Read frame (or reuse single image)
             if is_image:
                 img = img0
@@ -683,24 +732,50 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                 plt.close(fig)
 
                 # --- PoseStamped log for gap frame ---
-                if pose_log_fp is not None:
+                # if pose_log_fp is not None:
                     # Use pos_ms if available; otherwise 0
-                    t_ms = pos_ms if (not is_image and fps > 0) else 0.0
+                t_ms = pos_ms if (not is_image and fps > 0) else 0.0
                     # Translation: we hold previous 3D if available; else zeros (already in post_out)
                     # tx_ty_tz = prev_post_out[0]
                     # Quaternion: keep last known if any, else zeros
-                    quat = last_quat_for_log if last_quat_for_log is not None else np.zeros(4, dtype=np.float32)
-                    _log_pose_stamped(
-                        pose_log_fp,
-                        frame_i=i, has_person=False, t_ms=t_ms,
-                        frame_id=getattr(args, "ros_frame_id", "camera_color_optical_frame"),
-                        conf=None, yaw_deg=None, quat_wxyz=None,
-                        status="SKIP:no_person",
-                        pos_xyz_m=None, translation_source="none",
-                        note="gap/no_person"
-                    )
-                continue
+                    # quat = last_quat_for_log if last_quat_for_log is not None else np.zeros(4, dtype=np.float32)
+                    # _log_pose_stamped(
+                    #     pose_log_fp,
+                    #     frame_i=i, has_person=False, t_ms=t_ms,
+                    #     frame_id=getattr(args, "ros_frame_id", "camera_color_optical_frame"),
+                    #     conf=None, yaw_deg=None, quat_wxyz=None,
+                    #     status="SKIP:no_person",
+                    #     pos_xyz_m=None, translation_source="none",
+                    #     note="gap/no_person"
+                    # )
+                # Stage a GAP line and mark this frame to skip the rest of processing,
+                # but DO NOT 'continue' — we still want to reach the per-frame COMMIT.
+                t_ms = pos_ms if (not is_image and fps > 0) else 0.0
+                best_line = _stage_best(best_line, dict(frame_i = i, has_person = False, t_ms = t_ms,
+                    frame_id = getattr(args, "ros_frame_id", "camera_color_optical_frame"),
+                    conf = None, yaw_deg = None, quat_wxyz = None,
+                    status = "SKIP:no_person",
+                    pos_xyz_m = None, translation_source = "none",
+                    note = "gap/no_person"))
+                # skip_rest_of_frame = True
 
+                # Commit exactly one line for this frame, then skip heavy work
+                if pose_log_fp is not None and best_line is not None:
+                    _log_pose_stamped(
+                            pose_log_fp,
+                               frame_i = best_line["frame_i"],
+                           has_person = best_line["has_person"],
+                           t_ms = best_line["t_ms"],
+                           frame_id = best_line["frame_id"],
+                           conf = best_line["conf"],
+                           yaw_deg = best_line["yaw_deg"],
+                           quat_wxyz = best_line["quat_wxyz"],
+                           status = best_line["status"],
+                           pos_xyz_m = best_line["pos_xyz_m"],
+                           translation_source = best_line["translation_source"],
+                           note = best_line["note"],
+                       )
+                continue
 
             # -- Normalize to [-1,1] screen coords
             input_2D = normalize_screen_coordinates(input_2D_no, w=img.shape[1], h=img.shape[0])
@@ -756,7 +831,8 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
             pose_to_pub = None  # (pos, quat) to publish on /human_pose
             age_ms = 0
 
-            if has_person and (pos_xyz_m is not None):
+            # Fresh only if we have a translation AND a quaternion
+            if has_person and (pos_xyz_m is not None) and (prev_quat is not None):
                 # Fresh, valid measurement this frame
                 status = "ok"
                 _LKV["pose"] = {
@@ -771,7 +847,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                 )
             else:
                 # Invalid this frame: no person or no metric depth
-                status = "stale" if _LKV["pose"] is not None else ("no_person" if not has_person else "no_depth_image")
+                status = "stale" if _LKV["pose"] is not None else ("no_person" if not has_person else ("no_orientation" if (pos_xyz_m is not None) else "no_depth_image"))
                 if _LKV["pose"] is not None:
                     age_ms = now_ms - int(_LKV["t_ms"] or now_ms)
                     if age_ms <= timeout_ms:
@@ -984,8 +1060,8 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                                  Z_raw=int(Z_raw), Z_m=float(Z_m),
                                  pos_xyz_m=pos_xyz_m)
 
-            # -- Log PoseStamped for this frame (uses last_quat_for_log if available)
-            if pose_log_fp is not None:
+                # -- Stage "final" PoseStamped for this frame (uses last_quat_for_log if available)
+                # We'll commit the single best line once per frame after this block.
                 t_ms = pos_ms if (not is_image and fps > 0) else 0.0
                 # tx_ty_tz = post_out[0] if post_out is not None else np.zeros(3, dtype=np.float32)
                 # quat = last_quat_for_log if last_quat_for_log is not None else np.zeros(4, dtype=np.float32)
@@ -1024,18 +1100,40 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                 else:
                     final_status = trans_status
 
+                # Stage the final decision for this frame
+                best_line = _stage_best(best_line, dict(
+                frame_i = i, has_person = True, t_ms = t_ms,
+                frame_id = frame_id,
+                conf = (conf if 'conf' in locals() else None),
+                yaw_deg = (yaw_deg if 'yaw_deg' in locals() else None),
+                quat_wxyz = (prev_quat if 'prev_quat' in locals() else None),
+                status = final_status,
+                pos_xyz_m = pos_xyz_m,  # meters (or NA)
+                translation_source = trans_src,  # "depth" or "none"
+                note = (trans_note or "ok")))
+
+            # ---- Commit one PoseStamped line per frame ----
+            if pose_log_fp is not None and best_line is not None:
                 _log_pose_stamped(
                     pose_log_fp,
-                    frame_i=i, has_person=True, t_ms=t_ms,
-                    frame_id=frame_id,
-                    conf=conf if 'conf' in locals() else None,
-                    yaw_deg=yaw_deg if 'yaw_deg' in locals() else None,
-                    quat_wxyz=prev_quat if 'prev_quat' in locals() else None,
-                    status=final_status,
-                    pos_xyz_m=pos_xyz_m,  # meters (or NA)
-                    translation_source=trans_src,  # "depth" or "none"
-                    note=(trans_note or "ok")
-                )
+                    frame_i = best_line["frame_i"],
+                    has_person = best_line["has_person"],
+                    t_ms = best_line["t_ms"],
+                    frame_id = best_line["frame_id"],
+                    conf = best_line["conf"],
+                    yaw_deg = best_line["yaw_deg"],
+                    quat_wxyz = best_line["quat_wxyz"],
+                    status = best_line["status"],
+                    pos_xyz_m = best_line["pos_xyz_m"],
+                    translation_source = best_line["translation_source"],
+                    note = best_line["note"])
+
+            # (Optional) Single ROS publish per frame based on best_line
+            if best_line is not None and best_line["status"] == "OK":
+                # Build PoseStamped from best_line and publish once here.
+                # ros_pub.publish(pose_msg)
+                pass
+
 
             # -- Save 3D figure
             plt.savefig(output_dir_3D + str(('%04d' % i)) + '_3D.png', dpi=200, format='png', bbox_inches='tight')

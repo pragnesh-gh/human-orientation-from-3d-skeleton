@@ -1,0 +1,3 @@
+# PoseStamped log (one line per frame)
+# fields: frame_index | has_person | t_ms | frame_id | conf | yaw_deg | qw qx qy qz | status | pos_xyz_m | translation_source | note
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 13.630680 | 0.97465295 -0.010131343 0.22233588 0.022708364 | OK | [-0.9382993928195577, -0.08657001646516338, 2.068] | depth | depth_ok z=2.068m at (u=241, v=329) from depth_0152.png
