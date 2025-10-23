@@ -1,0 +1,133 @@
+Step 1: Message semantics & I/O contract (last-known publish + diagnostics). No code yet, just a crisp spec we’ll implement next.
+
+What we will publish (ROS1)
+
+Core topic
+
+/human_pose (geometry_msgs/PoseStamped)
+
+frame_id: camera_color_optical_frame
+
+header.stamp:
+
+Live: now()
+
+Offline: now() (we’ll add synthetic time later if needed)
+
+pose.position (x,y,z): meters, camera optical frame (+X right, +Y down, +Z forward)
+
+pose.orientation (x,y,z,w): torso quaternion (same as logs)
+
+Diagnostics topic
+
+/human_pose_status (std_msgs/String JSON or diagnostic_msgs/KeyValue; we’ll pick one in Step 2)
+
+Fields we’ll include:
+
+status: one of
+
+ok (fresh valid measurement this frame)
+
+no_person
+
+no_depth_image
+
+no_depth_at_root
+
+stale (we’re republishing last-known due to gap)
+
+confidence: float 0..1 (orientation confidence)
+
+translation_source: depth / none
+
+note: short human-readable reason (e.g., depth_ok z=2.313 @ (u=234,v=293) or the skip reason)
+
+age_ms: how long (ms) since last fresh pose
+
+u_px, v_px, z_raw, z_m (only when status=ok, optional)
+
+Behavior (state machine)
+
+We keep a last-known valid pose (LKV). Per frame:
+
+Person + depth OK
+
+Publish new PoseStamped on /human_pose.
+
+Publish diagnostics with status=ok, age_ms=0.
+
+Update LKV = this pose, reset timers.
+
+Person OK but depth missing/invalid (no_depth_image / no_depth_at_root)
+
+Republish LKV on /human_pose (if exists).
+
+Diagnostics: status=stale, include age_ms since the last ok, and the precise reason.
+
+If no LKV exists yet, do not publish on /human_pose; only diagnostics with status=no_depth_*.
+
+No person
+
+Republish LKV on /human_pose (if exists).
+
+Diagnostics: status=stale with reason=no_person + age_ms.
+
+If no LKV yet, do not publish on /human_pose; only diagnostics with status=no_person.
+
+Staleness timeout
+
+Define --stale_timeout_ms (default: 500 ms or 1,000 ms—your call).
+
+If age_ms > stale_timeout_ms, stop publishing on /human_pose; only publish diagnostics with status=no_person or status=no_depth_* (whichever is the cause) and age_ms.
+
+Rates & timing
+
+Publish rate: matches processing rate (or clamp with --pub_hz if we add it later).
+
+Timestamp: every /human_pose publish uses current ROS time even when pose is “stale” (so downstream time filters don’t drop it). The staleness is communicated via diagnostics age_ms.
+
+Multi-person (future-proofing without custom msgs)
+
+Primary person: publish on /human_pose (selection policy: highest person-confidence; we’ll document it).
+
+All persons (future): add /human_poses (geometry_msgs/PoseArray). IDs (if needed) go on a parallel diag topic (ID list aligned to PoseArray order).
+
+Mapping from your pipeline → ROS
+
+Position = pos_xyz_m (meters).
+
+Orientation = torso quaternion from your pipeline.
+
+Confidence = orientation confidence field you already compute.
+
+Status/Note = exactly the same strings you log now (plus stale).
+
+Frame = camera_color_optical_frame (you already use this).
+
+When depth disabled but you still want to publish: allowed, but then diagnostics will always say translation_source=none and either ok (if you choose to accept 0,0,0) or better: mark as stale/no_depth_image. (We’ll stick to last-known policy above.)
+
+Acceptance checks (what “done” looks like)
+
+When depth is present:
+
+/human_pose moves in Z consistently with the person’s distance; diag says status=ok, translation_source=depth.
+
+When depth disappears:
+
+/human_pose keeps publishing the last valid pose for up to stale_timeout_ms; diag flips to status=stale and shows increasing age_ms.
+
+When no person:
+
+Same as above but with status=stale/no_person. If never saw any valid pose, no /human_pose publishes, only diagnostics.
+
+RViz user can:
+
+Set Fixed Frame = camera_color_optical_frame.
+
+Add /human_pose and see a steady pose (fresh or stale) plus watch diag messages (via rostopic echo /human_pose_status) for clarity.
+
+Repo / collaboration notes (ties to this step)
+
+We will document these topic names, statuses, and the last-known policy in your README.md so your collaborator knows exactly what to expect.
+
+We’ll add a tiny “offline replayer” later that reads your pose_stamped.log and republishes the same PoseStamped/diag at a user-set rate, so they can validate RViz without running the whole pipeline.

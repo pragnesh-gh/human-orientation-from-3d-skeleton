@@ -15,8 +15,9 @@ yolov8n.pt
 vectors_and_angles.csv
 README.md
 status_update.txt
-plan.txt
-plan_partB.txt
+plan_pipeline.txt
+plan_final_steps.txt
 camera_info.txt
-
+execution_finalSteps.txt
+execution.txt
 

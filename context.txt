@@ -1,122 +1,100 @@
-def get_pose2D(source_path, output_dir):
-    _dbg("Entering get_pose2D", source_path=source_path, output_dir=output_dir)
+ # -- Model forward (non-flip + flip, then unflip & average)
+            output_3D_non_flip = model(input_2D_tensor[:, 0])  # [1,1,17,3]
+            output_3D_flip = model(input_2D_tensor[:, 1])  # [1,1,17,3]
+            output_3D_flip[:, :, :, 0] *= -1
+            output_3D_flip[:, :, joints_left + joints_right, :] = output_3D_flip[:, :, joints_right + joints_left, :]
+            output_3D = (output_3D_non_flip + output_3D_flip) / 2
+            output_3D[:, :, 0, :] = 0  # root at origin
+            post_out = output_3D[0, 0].detach().cpu().numpy()  # (17,3)
 
-    print('\nGenerating 2D pose...')
+            # -- Camera->world & depth lift (keep your static R)
+            rot = np.array([0.1407056450843811, -0.1500701755285263, -0.755240797996521, 0.6223280429840088],dtype='float32')
+            post_out = camera_to_world(post_out, R=rot, t=0)
+            post_out[:, 2] -= np.min(post_out[:, 2])
+            prev_post_out = post_out  # remember for gap frames
 
-    # --- Shield HRNet import from our CLI flags ---
-    with _strip_argv():
-        _dbg("Importing hrnet gen_kpts with stripped argv", argv=sys.argv)
-        from lib.hrnet.gen_kpts import gen_video_kpts as hrnet_pose
-    _dbg("Imported hrnet gen_kpts", func_module=hrnet_pose.__module__, func_name=hrnet_pose.__name__)
+            # -- Choose overlay source index to avoid early/late drift
+            # overlay_src_idx = min(i, keypoints.shape[1] - 1)
+            # overlay_2D_px = keypoints[0, overlay_src_idx]  # shape (17, 2)
+            # Use the center-of-window for video, index 0 for single image
+            overlay_2D_px = input_2D_no[0 if is_image else args.pad]
 
-    # Small helper to write a fallback npz + log when no person / HRNet fails
-    def _write_fallback_npz_and_log():
-        # Determine T (frames)
-        T = 1
-        # Try to detect if it's a video by opening with cv2 and reading frame count
-        try:
-            cap = cv2.VideoCapture(source_path)
-            if cap is not None and cap.isOpened():
-                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                if frames and frames > 0:
-                    T = frames
-            if cap is not None:
-                cap.release()
-        except Exception:
-            pass
+            if POSE_DEBUG:
+                est_ms = (i / fps * 1000.0) if fps > 0 else 0.0
+                print("[SYNC.DBG] "
+                      f"i={i} start={start} end={end} padL={left_pad} padR={right_pad} "
+                      f"overlay_src_idx=NOT_USED pos_ms={pos_ms:.2f} est_ms={est_ms:.2f} fps={fps:.2f}")
 
-        # Build zeros reconstruction: (1, T, 17, 2) so downstream code is happy
-        reconstruction = np.zeros((1, T, 17, 2), dtype=np.float32)
-        valid_mask = np.zeros((T,), dtype=np.uint8)
+            # ---- Step 2: last-known + diagnostics + optional ROS publish ----
+            _try_init_ros(args)
 
-        out2d_dir = os.path.join(output_dir, 'input_2D')
-        os.makedirs(out2d_dir, exist_ok=True)
-        output_npz = os.path.join(out2d_dir, 'keypoints.npz')
-        np.savez_compressed(output_npz, reconstruction=reconstruction, valid_mask=valid_mask)
+            conf_val = float(conf) if ('conf' in locals()) else 1.0
+            frame_id = getattr(args, "ros_frame_id", "camera_color_optical_frame")
+            now_ms = _now_ms()
+            timeout_ms = int(getattr(args, "stale_timeout_ms", 1000))
 
-        # Write a simple log so you know this source was skipped for pose detection
-        skip_log = os.path.join(output_dir, 'skip.log')
-        with open(skip_log, 'a', encoding='utf-8') as f:
-            f.write(f"[SKIP] No person detected or HRNet failed for: {source_path}\n")
-            f.write(f"       Wrote fallback npz to: {output_npz}\n")
-        _dbg("Wrote fallback npz + skip log", frames=T, npz=output_npz, log=skip_log)
+            # Decide status + which pose to publish (fresh or last-known)
+            status = None
+            pose_to_pub = None  # (pos, quat) to publish on /human_pose
+            age_ms = 0
 
-    # --- Shield HRNet call from our CLI flags as well ---
-    try:
-        with _strip_argv():
-            _dbg("Calling hrnet_pose(...) with stripped argv", argv=sys.argv,
-                 det_dim=416, num_peroson=1, gen_output=True)
-            # --- Force single image to look like a 1-frame numbered sequence for HRNet ---
-            src_for_hrnet = source_path
-            if is_image:
-                tmp_seq_dir = os.path.join(output_dir, "input_2D", "_hrnet_tmp_seq")
-                os.makedirs(tmp_seq_dir, exist_ok=True)
-                # Clear any leftovers from previous runs
-                for f in os.listdir(tmp_seq_dir):
-                    try:
-                        os.remove(os.path.join(tmp_seq_dir, f))
-                    except Exception:
+            if has_person and (pos_xyz_m is not None):
+                # Fresh, valid measurement this frame
+                status = "ok"
+                _LKV["pose"] = {
+                    "x": float(pos_xyz_m[0]), "y": float(pos_xyz_m[1]), "z": float(pos_xyz_m[2]),
+                    "qx": float(prev_quat[1]), "qy": float(prev_quat[2]), "qz": float(prev_quat[3]),
+                    "qw": float(prev_quat[0])
+                }
+                _LKV["t_ms"] = now_ms
+                pose_to_pub = (
+                    (_LKV["pose"]["x"], _LKV["pose"]["y"], _LKV["pose"]["z"]),
+                    (float(prev_quat[0]), float(prev_quat[1]), float(prev_quat[2]), float(prev_quat[3]))  # w,x,y,z
+                )
+            else:
+                # Invalid this frame: no person or no metric depth
+                status = "stale" if _LKV["pose"] is not None else ("no_person" if not has_person else "no_depth_image")
+                if _LKV["pose"] is not None:
+                    age_ms = now_ms - int(_LKV["t_ms"] or now_ms)
+                    if age_ms <= timeout_ms:
+                        # Republish last-known pose (last publish + diagnostics)
+                        p = _LKV["pose"]
+                        pose_to_pub = (
+                            (p["x"], p["y"], p["z"]),
+                            (p["qw"], p["qx"], p["qy"], p["qz"])  # w,x,y,z
+                        )
+                    else:
+                        # Too old: stop publishing on core topic; still emit diagnostics
                         pass
 
-                # Write image as frame_0000.png and pass HRNet a numbered pattern it expects
-                img_single = cv2.imread(source_path)
-                if img_single is None:
-                    raise FileNotFoundError(f"Cannot read image: {source_path}")
-                tmp_frame = os.path.join(tmp_seq_dir, "frame_0000.png")
-                cv2.imwrite(tmp_frame, img_single)
+            # Build diagnostics (console + optional ROS diag topic)
+            diag = {
+                "status": status,
+                "confidence": round(conf_val, 3),
+                "translation_source": trans_src,
+                "note": trans_note,
+                "age_ms": age_ms,
+                "frame_id": frame_id
+            }
+            if status == "ok" and (pos_xyz_m is not None):
+                diag.update({
+                    "x": float(pos_xyz_m[0]), "y": float(pos_xyz_m[1]), "z": float(pos_xyz_m[2])
+                })
 
-                src_for_hrnet = os.path.join(tmp_seq_dir, "frame_%04d.png")
-            keypoints, scores = hrnet_pose(src_for_hrnet if is_image else source_path, det_dim=416, num_peroson=1, gen_output=True)
-    except Exception as e:
-        # Typical when no people are present: ValueError from internal transpose
-        _dbg("HRNet call failed with Exception; writing fallback npz and continuing", err=str(e))
-        _write_fallback_npz_and_log()
-        print('Generating 2D pose (fallback, no person) complete!')
-        return
+            _emit_diag_console(diag)
+            _publish_ros_diag(diag)
 
-    _dbg("HRNet returned", kpts_shape=np.array(keypoints).shape, scores_shape=np.array(scores).shape)
+            # Publish PoseStamped on /human_pose only if we have something to publish
+            if pose_to_pub is not None:
+                pos_pub, quat_pub = pose_to_pub
+                _publish_ros_pose(frame_id, pos_pub, quat_pub, stamp_now=True)
+            #############################################################################################
 
-    try:
-        keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
-        _dbg("After h36m_coco_format", kpts_shape=np.array(keypoints).shape,
-             scores_shape=np.array(scores).shape, valid_frames_len=len(valid_frames))
+            # -- Write 2D overlay
+            image = show2Dpose(overlay_2D_px, copy.deepcopy(img))
+            cv2.putText(image, f"frame={i}", (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+            cv2.imwrite(output_dir_2D + f"{i:04d}_2D.png", image)
 
-        re_kpts = revise_kpts(keypoints, scores, valid_frames)
-        _dbg("After revise_kpts", re_kpts_shape=np.array(re_kpts).shape)
-
-        # --- If HRNet produced no usable frames/person, write fallback and stop 2D ---
-        if (not isinstance(re_kpts, np.ndarray)) or re_kpts.size == 0 or len(valid_frames) == 0:
-            _dbg("Empty 2D detections; writing fallback npz",
-                 re_kpts_shape=str(getattr(re_kpts, "shape", None)), valid_frames_len=len(valid_frames))
-            _write_fallback_npz_and_log()
-            print('Generating 2D pose (no person) complete!')
-            return
-
-        print('Generating 2D pose successful!')
-
-        out2d_dir = os.path.join(output_dir, 'input_2D')
-        os.makedirs(out2d_dir, exist_ok=True)
-        output_npz = os.path.join(out2d_dir, 'keypoints.npz')
-
-        # Build a frame-aligned valid mask from valid_frames (no dropped frames)
-        T = int(re_kpts.shape[1]) if re_kpts.ndim >= 2 else len(valid_frames)
-        valid_mask = np.zeros((T,), dtype=np.uint8)
-        if len(valid_frames) > 0:
-            vf = np.array(valid_frames, dtype=int)
-            vf = vf[(vf >= 0) & (vf < T)]
-            valid_mask[vf] = 1
-
-        np.savez_compressed(
-            output_npz,
-            reconstruction=re_kpts,       # aligned to full video length
-            valid_mask=valid_mask         # 1 = person present on that frame
-        )
-        if POSE_DEBUG:
-            print(f"[2D.DBG] Saved {output_npz}: T={re_kpts.shape[1]}, valid_sum={int(valid_mask.sum())}")
-        _dbg("Saved 2D keypoints", output_npz=output_npz)
-    except Exception as e:
-        # If post-HRNet formatting fails for an empty/odd case, fall back too
-        _dbg("Post-processing failed; writing fallback npz and continuing", err=str(e))
-        _write_fallback_npz_and_log()
-        print('Generating 2D pose (fallback, post-process) complete!')
-        return
+            # -- Prepare 3D figure (and optional orientation triad)
+            fig = plt.figure(figsize=(9.6, 5.4))
+            gs = gridspec.GridSpec(1, 1)

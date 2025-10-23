@@ -30,6 +30,7 @@ from pathlib import Path
 from contextlib import contextmanager
 import math
 import re
+import time
 
 def _dbg(msg, **kwargs):
     print(f"[VIS.DBG] {msg}")
@@ -158,6 +159,72 @@ def _hrnet_safe_image_path(image_path: str, tmp_dir: str) -> str:
         cv2.imwrite(tmp_path, img)
         return tmp_path.replace("\\", "/")
     return p.replace("\\", "/")
+# ========== LKV + ROS helpers (safe on Windows) ==========
+_LKV = {
+    "pose": None,        # dict: {"x":..,"y":..,"z":..,"qx":..,"qy":..,"qz":..,"qw":..}
+    "t_ms": None         # last fresh timestamp (monotonic ms or your pos_ms)
+}
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+# Lazy ROS init + publishers (only if --ros-publish and ROS is installed)
+_ros_ready = False
+_ros_pose_pub = None
+_ros_diag_pub = None
+
+def _try_init_ros(args):
+    global _ros_ready, _ros_pose_pub, _ros_diag_pub
+    if _ros_ready:
+        return
+    if not getattr(args, "ros_publish", False):
+        return
+    try:
+        import rospy
+        from geometry_msgs.msg import PoseStamped
+        from std_msgs.msg import String
+        if not rospy.core.is_initialized():
+            rospy.init_node('poseformer_publisher', anonymous=True, disable_signals=True)
+        _ros_pose_pub = rospy.Publisher(args.ros_topic, PoseStamped, queue_size=10)
+        _ros_diag_pub = rospy.Publisher(args.ros_diag_topic, String, queue_size=10)
+        _ros_ready = True
+        print(f"[ROS] Publishers ready: {args.ros_topic}, {args.ros_diag_topic}")
+    except Exception as e:
+        print(f"[ROS] Not available (won't publish). Reason: {e}")
+        _ros_ready = False
+
+def _publish_ros_pose(frame_id, pos, quat, stamp_now=True):
+    if not _ros_ready or pos is None or quat is None:
+        return
+    try:
+        import rospy
+        from geometry_msgs.msg import PoseStamped
+        msg = PoseStamped()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = rospy.Time.now() if stamp_now else rospy.Time()
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = pos
+        # ROS uses x,y,z,w order
+        msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w = quat[1], quat[2], quat[3], quat[0]
+        _ros_pose_pub.publish(msg)
+    except Exception as e:
+        print(f"[ROS] Pose publish error: {e}")
+
+def _publish_ros_diag(diag_dict):
+    if not _ros_ready:
+        return
+    try:
+        from std_msgs.msg import String
+        _ros_diag_pub.publish(String(data=json.dumps(diag_dict)))
+    except Exception as e:
+        print(f"[ROS] Diag publish error: {e}")
+
+def _emit_diag_console(diag_dict):
+    # Compact one-line console emitter
+    try:
+        print(f"[DIAG] {json.dumps(diag_dict, separators=(',', ':'))}")
+    except Exception:
+        pass
+
 
 
 
@@ -634,6 +701,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                     )
                 continue
 
+
             # -- Normalize to [-1,1] screen coords
             input_2D = normalize_screen_coordinates(input_2D_no, w=img.shape[1], h=img.shape[0])
 
@@ -674,6 +742,71 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                 print("[SYNC.DBG] "
                       f"i={i} start={start} end={end} padL={left_pad} padR={right_pad} "
                       f"overlay_src_idx=NOT_USED pos_ms={pos_ms:.2f} est_ms={est_ms:.2f} fps={fps:.2f}")
+
+            # ---- Step 2: last-known + diagnostics + optional ROS publish ----
+            _try_init_ros(args)
+
+            conf_val = float(conf) if ('conf' in locals()) else 1.0
+            frame_id = getattr(args, "ros_frame_id", "camera_color_optical_frame")
+            now_ms = _now_ms()
+            timeout_ms = int(getattr(args, "stale_timeout_ms", 1000))
+
+            # Decide status + which pose to publish (fresh or last-known)
+            status = None
+            pose_to_pub = None  # (pos, quat) to publish on /human_pose
+            age_ms = 0
+
+            if has_person and (pos_xyz_m is not None):
+                # Fresh, valid measurement this frame
+                status = "ok"
+                _LKV["pose"] = {
+                    "x": float(pos_xyz_m[0]), "y": float(pos_xyz_m[1]), "z": float(pos_xyz_m[2]),
+                    "qx": float(prev_quat[1]), "qy": float(prev_quat[2]), "qz": float(prev_quat[3]),
+                    "qw": float(prev_quat[0])
+                }
+                _LKV["t_ms"] = now_ms
+                pose_to_pub = (
+                    (_LKV["pose"]["x"], _LKV["pose"]["y"], _LKV["pose"]["z"]),
+                    (float(prev_quat[0]), float(prev_quat[1]), float(prev_quat[2]), float(prev_quat[3]))  # w,x,y,z
+                )
+            else:
+                # Invalid this frame: no person or no metric depth
+                status = "stale" if _LKV["pose"] is not None else ("no_person" if not has_person else "no_depth_image")
+                if _LKV["pose"] is not None:
+                    age_ms = now_ms - int(_LKV["t_ms"] or now_ms)
+                    if age_ms <= timeout_ms:
+                        # Republish last-known pose (last publish + diagnostics)
+                        p = _LKV["pose"]
+                        pose_to_pub = (
+                            (p["x"], p["y"], p["z"]),
+                            (p["qw"], p["qx"], p["qy"], p["qz"])  # w,x,y,z
+                        )
+                    else:
+                        # Too old: stop publishing on core topic; still emit diagnostics
+                        pass
+
+            # Build diagnostics (console + optional ROS diag topic)
+            diag = {
+                "status": status,
+                "confidence": round(conf_val, 3),
+                "translation_source": trans_src,
+                "note": trans_note,
+                "age_ms": age_ms,
+                "frame_id": frame_id
+            }
+            if status == "ok" and (pos_xyz_m is not None):
+                diag.update({
+                    "x": float(pos_xyz_m[0]), "y": float(pos_xyz_m[1]), "z": float(pos_xyz_m[2])
+                })
+
+            _emit_diag_console(diag)
+            _publish_ros_diag(diag)
+
+            # Publish PoseStamped on /human_pose only if we have something to publish
+            if pose_to_pub is not None:
+                pos_pub, quat_pub = pose_to_pub
+                _publish_ros_pose(frame_id, pos_pub, quat_pub, stamp_now=True)
+            #############################################################################################
 
             # -- Write 2D overlay
             image = show2Dpose(overlay_2D_px, copy.deepcopy(img))
@@ -1068,6 +1201,13 @@ if __name__ == "__main__":
     parser.add_argument('--fy', type=float, default=911.56)
     parser.add_argument('--cx', type=float, default=654.27)
     parser.add_argument('--cy', type=float, default=366.90)
+
+    parser.add_argument('--stale-timeout-ms', type=int, default=1000,
+                        help='Max age (ms) to keep re-publishing the last-known pose when current frame is invalid.')
+    parser.add_argument('--ros-topic', type=str, default='/human_pose',
+                        help='ROS topic for PoseStamped.')
+    parser.add_argument('--ros-diag-topic', type=str, default='/human_pose_status',
+                        help='ROS topic for diagnostics (String JSON).')
 
 
 
