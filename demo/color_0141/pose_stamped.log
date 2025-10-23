@@ -1,0 +1,11 @@
+# PoseStamped log (one line per frame)
+# fields: frame_index | has_person | t_ms | frame_id | conf | yaw_deg | qw qx qy qz | status | pos_xyz_m | translation_source | note
+000000 | 0 | 0.00 | camera_color_optical_frame | NA | NA | 0.000000 0.000000 0.000000 0.000000 | SKIP:no_person | NA | none | gap/no_person
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221526 | 0.9964187 -0.0027884396 0.0842084 0.007131281 | SKIP:no_depth | NA | none | no_depth_image
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221977 | 0.99641806 -0.0027886184 0.084216274 0.007131983 | SKIP:no_depth | NA | none | no_depth_image
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221977 | 0.99641806 -0.0027886184 0.084216274 0.007131983 | SKIP:no_depth | NA | none | no_depth_image
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221713 | 0.9964185 -0.0027885213 0.084211715 0.007131522 | SKIP:no_depth | NA | none | no_depth_image
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221977 | 0.99641806 -0.0027886184 0.084216274 0.007131983 | SKIP:no_depth | NA | none | no_depth_image (None)
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221713 | 0.9964185 -0.0027885213 0.084211715 0.007131522 | SKIP:no_depth | NA | none | no_depth_image (None)
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221977 | 0.99641806 -0.0027886184 0.084216274 0.007131983 | OK | [-0.8822532962593703, -0.039487222658703254, 1.825] | depth | depth_ok z=1.825m at (u=214, v=347) from depth_0141.png
+000000 | 1 | 0.00 | camera_color_optical_frame | 1.000000 | 5.221526 | 0.9964187 -0.0027884396 0.0842084 0.007131281 | OK | [-0.8822530212907918, -0.0394864283834597, 1.825] | depth | depth_ok z=1.825m at (u=214, v=347) from depth_0141.png
