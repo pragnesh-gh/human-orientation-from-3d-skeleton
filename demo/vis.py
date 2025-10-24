@@ -14,6 +14,10 @@ if _REPO_ROOT not in sys.path:
 POSE_DEBUG = os.getenv("POSE_DEBUG", "0") != "0"
 
 
+from visualization_msgs.msg import Marker
+import tf2_ros
+from geometry_msgs.msg import TransformStamped
+
 try:
     from common.orientation import compute_torso_frame, smooth_quat
 except ModuleNotFoundError:
@@ -176,9 +180,12 @@ def _now_ms():
 _ros_ready = False
 _ros_pose_pub = None
 _ros_diag_pub = None
+_marker_pub = None
+_tf_broadcaster = None
+
 
 def _try_init_ros(args):
-    global _ros_ready, _ros_pose_pub, _ros_diag_pub
+    global _ros_ready, _ros_pose_pub, _ros_diag_pub, _marker_pub, _tf_broadcaster
     if _ros_ready:
         return
     if not getattr(args, "ros_publish", False):
@@ -191,8 +198,11 @@ def _try_init_ros(args):
             rospy.init_node('poseformer_publisher', anonymous=True, disable_signals=True)
         _ros_pose_pub = rospy.Publisher(args.ros_topic, PoseStamped, queue_size=10)
         _ros_diag_pub = rospy.Publisher(args.ros_diag_topic, String, queue_size=10)
+        _marker_pub = rospy.Publisher(args.marker_topic, Marker, queue_size=10) if args.publish_marker else None
+        _tf_broadcaster = tf2_ros.TransformBroadcaster() if args.publish_tf else None
         _ros_ready = True
-        print(f"[ROS] Publishers ready: {args.ros_topic}, {args.ros_diag_topic}")
+        print(f"[ROS] Publishers ready: {args.ros_topic}, {args.ros_diag_topic}"
+              f"{' + marker' if _marker_pub else ''}{' + tf' if _tf_broadcaster else ''}")
     except Exception as e:
         print(f"[ROS] Not available (won't publish). Reason: {e}")
         _ros_ready = False
@@ -229,7 +239,40 @@ def _emit_diag_console(diag_dict):
     except Exception:
         pass
 
+#=========================================================================================
+#RViz helpers.
+def _make_marker(frame_id, pos, quat_wxyz, ns="human_pose", mid=1, scale=0.1):
+    m = Marker()
+    m.header.frame_id = frame_id
+    m.header.stamp = rospy.Time.now()
+    m.ns = ns
+    m.id = mid
+    m.type = Marker.ARROW
+    m.action = Marker.ADD
+    m.scale.x = scale * 1.5   # shaft length
+    m.scale.y = scale * 0.2   # shaft diameter
+    m.scale.z = scale * 0.2
+    m.color.r, m.color.g, m.color.b, m.color.a = 0.2, 0.8, 0.2, 0.9
+    m.pose.position.x, m.pose.position.y, m.pose.position.z = pos
+    # quat_wxyz = [w,x,y,z] → ROS wants x,y,z,w
+    m.pose.orientation.x = quat_wxyz[1]
+    m.pose.orientation.y = quat_wxyz[2]
+    m.pose.orientation.z = quat_wxyz[3]
+    m.pose.orientation.w = quat_wxyz[0]
+    return m
 
+def _send_tf(tf_broadcaster, parent_frame, child_frame, pos, quat_wxyz):
+    t = TransformStamped()
+    t.header.stamp = rospy.Time.now()
+    t.header.frame_id = parent_frame
+    t.child_frame_id = child_frame
+    t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = pos
+    t.transform.rotation.x = quat_wxyz[1]
+    t.transform.rotation.y = quat_wxyz[2]
+    t.transform.rotation.z = quat_wxyz[3]
+    t.transform.rotation.w = quat_wxyz[0]
+    tf_broadcaster.sendTransform(t)
+#=====================================================================================
 
 
 
@@ -857,9 +900,21 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                             (p["x"], p["y"], p["z"]),
                             (p["qw"], p["qx"], p["qy"], p["qz"])  # w,x,y,z
                         )
+                        # After republishing last-known PoseStamped (stale, age_ms <= timeout):
+                        if _marker_pub is not None and _LKV["pose"] is not None:
+                            p = _LKV["pose"]
+                            pos_pub = (p["x"], p["y"], p["z"])
+                            quat_pub = (p["qw"], p["qx"], p["qy"], p["qz"])
+                            _marker_pub.publish(_make_marker(frame_id, pos_pub, quat_pub))
+                        if _tf_broadcaster is not None and _LKV["pose"] is not None:
+                            p = _LKV["pose"]
+                            pos_pub = (p["x"], p["y"], p["z"])
+                            quat_pub = (p["qw"], p["qx"], p["qy"], p["qz"])
+                            _send_tf(_tf_broadcaster, frame_id, args.tf_child_frame, pos_pub, quat_pub)
                     else:
                         # Too old: stop publishing on core topic; still emit diagnostics
                         pass
+
 
             # Build diagnostics (console + optional ROS diag topic)
             diag = {
@@ -882,6 +937,17 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
             if pose_to_pub is not None:
                 pos_pub, quat_pub = pose_to_pub
                 _publish_ros_pose(frame_id, pos_pub, quat_pub, stamp_now=True)
+            # After publishing fresh PoseStamped:
+            if _marker_pub is not None and pos_xyz_m is not None and prev_quat is not None:
+                _marker_pub.publish(_make_marker(frame_id,
+                                                 (float(pos_xyz_m[0]), float(pos_xyz_m[1]), float(pos_xyz_m[2])),
+                                                 (float(prev_quat[0]), float(prev_quat[1]), float(prev_quat[2]),
+                                                  float(prev_quat[3]))))
+            if _tf_broadcaster is not None and pos_xyz_m is not None and prev_quat is not None:
+                _send_tf(_tf_broadcaster, frame_id, args.tf_child_frame,
+                         (float(pos_xyz_m[0]), float(pos_xyz_m[1]), float(pos_xyz_m[2])),
+                         (float(prev_quat[0]), float(prev_quat[1]), float(prev_quat[2]), float(prev_quat[3])))
+
             #############################################################################################
 
             # -- Write 2D overlay
@@ -1307,7 +1373,10 @@ if __name__ == "__main__":
     parser.add_argument('--ros-diag-topic', type=str, default='/human_pose_status',
                         help='ROS topic for diagnostics (String JSON).')
 
-
+    parser.add_argument("--publish-tf", action="store_true", help="broadcast TF frame for the human pose")
+    parser.add_argument("--tf-child-frame", default="human_base", help="child TF frame for the person")
+    parser.add_argument("--publish-marker", action="store_true", help="publish RViz Marker for the pose")
+    parser.add_argument("--marker-topic", default="/human_pose_marker", help="RViz Marker topic")
 
     args = parser.parse_args()
     _dbg("Parsed args", video=args.video, image=args.image, gpu=args.gpu)
