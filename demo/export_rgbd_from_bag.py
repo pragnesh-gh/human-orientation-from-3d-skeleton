@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, argparse, math
-from collections import deque
+from collections import deque  # not needed anymore, but harmless
 import rosbag
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -17,16 +17,14 @@ def save_color(path, cv_bgr):
     cv2.imwrite(path, cv_bgr)
 
 def save_depth(path, cv_u16):
-    # Ensure uint16, write as 16-bit PNG
     if cv_u16.dtype != np.uint16:
         cv_u16 = cv_u16.astype(np.uint16)
     cv2.imwrite(path, cv_u16)
 
 def nearest_match(src_stamp, queue, tol_sec):
-    """Find and remove from queue the element with stamp nearest to src_stamp within tol_sec."""
+    """queue is a list of (t, img). Remove and return the closest within tol."""
     if not queue:
         return None
-    # Linear scan is fine with small buffers; keep buffers short.
     best_i, best_dt = -1, float('inf')
     for i, (t, _) in enumerate(queue):
         dt = abs(t - src_stamp)
@@ -34,7 +32,7 @@ def nearest_match(src_stamp, queue, tol_sec):
             best_dt = dt
             best_i = i
     if best_i >= 0 and best_dt <= tol_sec:
-        return queue.pop(best_i)
+        return queue.pop(best_i)  # works for list
     return None
 
 def main():
@@ -56,8 +54,9 @@ def main():
     ensure_dir(depth_dir)
 
     bridge = CvBridge()
-    color_q = deque()  # entries: (t, cv_bgr)
-    depth_q = deque()  # entries: (t, cv_u16)
+    # --- use lists (not deque) so we can pop by index
+    color_q = []  # entries: (t, cv_bgr)
+    depth_q = []  # entries: (t, cv_u16)
 
     pairs_saved = 0
     seen_pairs = 0
@@ -67,53 +66,43 @@ def main():
         t_start = t0 + args.start_secs
         t_end = math.inf if args.duration is None else (t_start + args.duration)
 
-        # Restrict to the two topics for speed
         topics = [args.color_topic, args.depth_topic]
         for topic, msg, stamp in bag.read_messages(topics=topics):
-            t = sec_from_stamp(stamp)
+            t = stamp.secs + stamp.nsecs * 1e-9
             if t < t_start:
                 continue
             if t > t_end:
                 break
 
             if topic == args.color_topic:
-                # Convert to BGR8
                 try:
                     cv_bgr = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-                except Exception as e:
-                    # Skip on conversion errors
+                except Exception:
                     continue
-                # Try to match with pending depth
                 match = nearest_match(t, depth_q, args.time_tol)
                 if match is not None:
                     t_depth, cv_u16 = match
                     seen_pairs += 1
                     if (seen_pairs - 1) % args.stride == 0:
                         idx = pairs_saved
-                        color_path = os.path.join(color_dir, f"color_{idx:06d}.png")
-                        depth_path = os.path.join(depth_dir, f"depth_{idx:06d}.png")
-                        save_color(color_path, cv_bgr)
-                        save_depth(depth_path, cv_u16)
+                        save_color(os.path.join(color_dir, f"color_{idx:06d}.png"), cv_bgr)
+                        save_depth(os.path.join(depth_dir,  f"depth_{idx:06d}.png"),  cv_u16)
                         pairs_saved += 1
                         if pairs_saved % 50 == 0:
                             print(f"[INFO] saved pairs: {pairs_saved}")
                         if pairs_saved >= args.max_pairs:
                             break
                 else:
-                    # Buffer color until a matching depth arrives
                     color_q.append((t, cv_bgr))
-                    # keep buffer short
-                    while len(color_q) > 200:
-                        color_q.popleft()
+                    if len(color_q) > 200:
+                        del color_q[0]
 
             elif topic == args.depth_topic:
-                # Convert to raw uint16 depth
                 try:
                     cv_u16 = bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-                except Exception as e:
+                except Exception:
                     continue
                 if cv_u16.dtype != np.uint16:
-                    # Try forcing to uint16 if it's mono16 as int16 etc.
                     cv_u16 = cv_u16.astype(np.uint16)
 
                 match = nearest_match(t, color_q, args.time_tol)
@@ -122,10 +111,8 @@ def main():
                     seen_pairs += 1
                     if (seen_pairs - 1) % args.stride == 0:
                         idx = pairs_saved
-                        color_path = os.path.join(color_dir, f"color_{idx:06d}.png")
-                        depth_path = os.path.join(depth_dir, f"depth_{idx:06d}.png")
-                        save_color(color_path, cv_bgr)
-                        save_depth(depth_path, cv_u16)
+                        save_color(os.path.join(color_dir, f"color_{idx:06d}.png"), cv_bgr)
+                        save_depth(os.path.join(depth_dir,  f"depth_{idx:06d}.png"),  cv_u16)
                         pairs_saved += 1
                         if pairs_saved % 50 == 0:
                             print(f"[INFO] saved pairs: {pairs_saved}")
@@ -133,8 +120,8 @@ def main():
                             break
                 else:
                     depth_q.append((t, cv_u16))
-                    while len(depth_q) > 200:
-                        depth_q.popleft()
+                    if len(depth_q) > 200:
+                        del depth_q[0]
 
     print(f"[DONE] saved {pairs_saved} pairs to {args.out}/(color|depth)")
 
