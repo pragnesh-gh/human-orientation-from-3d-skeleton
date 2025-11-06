@@ -280,7 +280,7 @@ if __name__ == "__main__":
 #    roscore
 #
 # 2) Replay PoseStamped + diagnostics (loop so you can inspect):
-#    python demo/replay_pose.py --log demo/output/color_0141/pose_stamped.log --hz 10 --loop
+#    python demo/replay_pose.py --log demo/color_0141/pose_stamped.log --hz 10 --loop
 #
 #    Inspect in terminal:
 #      rostopic list
@@ -289,7 +289,7 @@ if __name__ == "__main__":
 #      rostopic echo /human_pose_status -n 3
 #
 # 3) Add TF + RViz Marker (optional visualization outputs):
-#    python demo/replay_pose.py --log demo/output/color_0141/pose_stamped.log --hz 10 --loop \
+#    python demo/replay_pose.py --log demo/color_0141/pose_stamped.log --hz 10 --loop \
 #        --publish-tf --tf-child-frame human_base \
 #        --publish-marker --marker-topic /human_pose_marker --marker-scale 0.2
 #
