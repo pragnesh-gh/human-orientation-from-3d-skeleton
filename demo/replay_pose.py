@@ -274,25 +274,40 @@ def main():
 if __name__ == "__main__":
     main()
 
-# ---------------------- Usage / Verification ----------------------
-# On a ROS machine (ROS1):
-#   source /opt/ros/noetic/setup.bash
-#   roscore
+# ---------------------- How to run & verify (cheatsheet) ----------------------
+# 1) Start ROS core:
+#    source /opt/ros/noetic/setup.bash
+#    roscore
 #
-# 1) Replay at 10 Hz, PoseStamped + diagnostics only:
-#   python demo/replay_pose.py --log demo/output/color_0141/pose_stamped.log --hz 10
+# 2) Replay PoseStamped + diagnostics (loop so you can inspect):
+#    python demo/replay_pose.py --log demo/output/color_0141/pose_stamped.log --hz 10 --loop
 #
-# 2) Replay + RViz Marker + TF frame:
-#   python demo/replay_pose.py --log demo/output/color_0141/pose_stamped.log --hz 10 \
-#       --publish-marker --marker-topic /human_pose_marker --marker-scale 0.2 \
-#       --publish-tf --tf-child-frame human_base
+#    Inspect in terminal:
+#      rostopic list
+#      rostopic hz /human_pose
+#      rostopic echo /human_pose -n 3
+#      rostopic echo /human_pose_status -n 3
 #
-# Inspect via terminal:
-#   rostopic hz /human_pose
-#   rostopic echo /human_pose -n 3
-#   rostopic echo /human_pose_status -n 3
+# 3) Add TF + RViz Marker (optional visualization outputs):
+#    python demo/replay_pose.py --log demo/output/color_0141/pose_stamped.log --hz 10 --loop \
+#        --publish-tf --tf-child-frame human_base \
+#        --publish-marker --marker-topic /human_pose_marker --marker-scale 0.2
 #
-# RViz:
-#   - Fixed Frame: camera_color_optical_frame
-#   - Add 'TF' display (to see the human_base frame)
-#   - Add 'Marker' display on /human_pose_marker (arrow at the pose)
+#    TF/Marker are NOT part of /human_pose:
+#      - Marker: rostopic echo /human_pose_marker -n 1      # (message exists; for RViz display)
+#      - TF:     rostopic echo /tf -n 1                     # (raw TF packets; noisy)
+#               rosrun tf tf_echo camera_color_optical_frame human_base
+#                # prints the transform being broadcast (updates continuously)
+#
+# 4) RViz (GUI):
+#    rviz
+#      - Fixed Frame: camera_color_optical_frame
+#      - Add "TF" display  (to see 'human_base' under the camera frame)
+#      - Add "Marker" display, Topic: /human_pose_marker  (green arrow at the pose)
+#      - (Optionally) Add "Pose" display, Topic: /human_pose
+#
+# Notes:
+#  - Use --loop during inspection; otherwise the replayer publishes once and exits.
+#  - To see a last message even after exit, make publishers latched (code change).
+#  - If you don't pass --publish-tf/--publish-marker, behavior is identical to plain replay.
+
