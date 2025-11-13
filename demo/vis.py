@@ -14,9 +14,17 @@ if _REPO_ROOT not in sys.path:
 POSE_DEBUG = os.getenv("POSE_DEBUG", "0") != "0"
 
 
-from visualization_msgs.msg import Marker
-import tf2_ros
-from geometry_msgs.msg import TransformStamped
+try:
+    from visualization_msgs.msg import Marker
+    import tf2_ros
+    from geometry_msgs.msg import TransformStamped
+    _ROS_VIZ_OK = True
+except Exception:
+    # Running on Windows / non-ROS env: disable TF/Marker cleanly
+    Marker = None
+    tf2_ros = None
+    TransformStamped = None
+    _ROS_VIZ_OK = False
 
 try:
     from common.orientation import compute_torso_frame, smooth_quat
@@ -182,6 +190,17 @@ _ros_pose_pub = None
 _ros_diag_pub = None
 _marker_pub = None
 _tf_broadcaster = None
+
+if _ros_ready:
+    if getattr(args, "publish_marker", False) and _ROS_VIZ_OK:
+        marker_pub = rospy.Publisher(args.marker_topic, Marker, queue_size=10)
+    elif getattr(args, "publish_marker", False) and not _ROS_VIZ_OK:
+        print("[ROS.VIZ] visualization_msgs not available; skipping Marker publisher.")
+
+    if getattr(args, "publish_tf", False) and _ROS_VIZ_OK:
+        tf_broadcaster = tf2_ros.TransformBroadcaster()
+    elif getattr(args, "publish_tf", False) and not _ROS_VIZ_OK:
+        print("[ROS.VIZ] tf2_ros not available; skipping TF broadcaster.")
 
 
 def _try_init_ros(args):
