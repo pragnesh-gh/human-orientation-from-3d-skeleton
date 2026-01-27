@@ -1,338 +1,597 @@
-Project Structure:
-
-Project Root: C:\Users\ppk_2\Desktop\University\SummerSem-25\Human_Pose_Estimate\PoseFormerV2_latest
-
-Repository Structure and Important Files:
-
-checkpoint/
-  └── 27_243_45.2.bin
-
-common/
-  ├── arguments.py
-  ├── camera.py
-  ├── custom_dataset.py
-  ├── generators.py
-  ├── h36m_dataset.py
-  ├── loss.py
-  ├── mocap_dataset.py
-  ├── model_poseformer.py
-  ├── orientation.py
-  ├── quaternion.py
-  ├── skeleton.py
-  ├── utils.py
-  ├── visualization.py
-  └── README.MD
-
-demo/
-  ├── image/
-  ├── lib/
-  ├── output/
-  ├── video/
-  │   ├── pose_pipeline.py
-  │   ├── pose_pipeline_singleFrame.py
-  │   └── vis.py
-  └── yolov8n.pt
-
-images/
-
-mpi_inf_3dhp/
-
-run_poseformer.py
-
-single_frame.ipynb
-
-status_update.txt
-
-vectors_and_angles.csv
-
-yolov8n.pt
-
-file_info.txt
-
-plan.txt
-
-README.md
-
-requirements.txt
-
-LICENSE
-
-
-
-
-Descriptions:
-
-From the GitHub repo (PoseFormerV2):
-Project focus: 3D human pose estimation from 2D keypoints.
-
-Based on transformers — PoseFormerV2 is an improved architecture over PoseFormer (with better spatio-temporal modeling).
-
-Benchmarks: Human3.6M, MPI-INF-3DHP datasets.
-
-Reported to outperform many baselines in accuracy and efficiency.
-
-Provides:
-
-Pretrained weights and checkpoints.
-
-Training/evaluation scripts (like the one you uploaded).
-
-Configurable arguments (dataset choice, keypoints type, number of frames, downsampling, etc.).
-
-Visualization tools for qualitative results.
-
-Repo structure:
-
-common/ → utilities (datasets, models, losses, camera tools, visualization).
-
-data/ → expected dataset storage.
-
-checkpoints/ → pretrained model weights.
-
-Main scripts: run_poseformer.py (training/eval) and helpers.
-
-run_poseformer.py:
-It’s the main training and evaluation script for PoseFormerV2.
-
-Imports from the repo’s common modules: arguments parsing, camera utilities, datasets (H36M or custom), model definition (PoseTransformerV2), loss functions, generators, visualization, etc.
-
-Defines get_poseformer_model() — a helper that lets you load a trained model + args safely (useful for notebooks or pipelines).
-
-Main functionalities:
-
-Loads dataset (default Human3.6M or custom).
-
-Prepares 2D detections and aligns with 3D ground truth.
-
-Builds and initializes the PoseFormerV2 model (transformer-based).
-
-Training loop: uses AdamW, supports resuming checkpoints, saves best checkpoints.
-
-Evaluation: computes MPJPE, P-MPJPE, N-MPJPE, velocity errors, and (if MPI dataset) PCK/AUC.
-
-Supports visualization (render_animation) to compare predictions vs. ground truth.
-
-Includes checkpoint management (best_epoch.bin, epoch_X.bin) and logging.
-
-GPU support: wraps models in nn.DataParallel if CUDA is available.
-
-The script has been slightly modified (there’s a patch note at the top about preventing CLI parsing on import).
-
-
-vis.py:
-It is the main demo script for PoseFormerV2 that takes either a video, a single image, or a folder of images, generates 2D keypoints with HRNet (using a sys.argv strip hack to avoid HRNet’s argparse conflicts), lifts them to 3D with the pretrained PoseFormerV2 checkpoint (27_243_45.2.bin), and produces a side-by-side visualization showing the input (with 2D overlay) and the reconstructed 3D skeleton. The pipeline is: get_pose2D → save input_2D/keypoints.npz, get_pose3D → normalize, augment, run the transformer, and render PNGs (pose2D/, pose3D/, pose/), and finally combine results. For video input it stitches frames into an MP4, for a single image it saves one PNG, and for a folder it repeats the image flow for each file. Key arguments are --video, --image, --image-dir, and --gpu. The script ensures only one parser is used, fixes cropping so subjects are not cut, and handles both absolute paths and default ./demo/video/ or ./demo/image/ locations.
-Still runs image/video/folder demo with its own argparse group; orientation is currently wired via the global args only when you integrate it into the main pipeline scripts. (No conflict; separate parser.)
-arguments.py - all the command-line flags in one place:
-Defines every CLI option you can pass when running training/eval/visualization: which dataset, which 2D keypoints, which subjects to train/test, checkpoint paths, whether to render, GPU selection, learning rate, epochs, batch size, number of frames, transformer depth, etc. It also has a bunch of visualization options (subject/action/camera/video, output path, bitrate, frame limits). It validates a couple of incompatible combos (e.g., you can’t use --resume and --evaluate together).
-Every top-level script (like run_poseformer.py or your demo/vis.py) calls parse_args() here to get a single args object. All downstream modules (data loading, model build, training loop, visualization) read from args to stay consistent. For example, --number-of-frames decides the model’s temporal receptive field; --gpu controls CUDA_VISIBLE_DEVICES; --viz-* options steer rendering.
-Added opt-in flags to enable orientation estimation and control layout/smoothing/overlay/output:
---estimate-orientation, --orientation-layout {h36m,coco17}, --orientation-alpha, --orientation-conf-min, --orientation-overlay, --orientation-overlay-scale, --orientation-save {csv|json}.
-Defaults keep existing behavior unchanged
-
-camera.py — coordinate transforms + projection math:
-What’s inside (plain English):
-
-Utility functions for converting coordinates between different spaces and for normalizing/un-normalizing 2D keypoints:
-
-normalize_screen_coordinates(X, w, h): maps image-pixel 2D points to a normalized range roughly in [-1, 1] while keeping aspect ratio. Used before feeding 2D into the model.
-
-image_coordinates(X, w, h): inverts the above — takes normalized 2D and brings it back to image pixel coordinates (handy for visualization).
-
-world_to_camera(X, R, t) and camera_to_world(X, R, t): rotate/translate 3D points between world and camera frames using quaternions.
-
-project_to_2d(...) and project_to_2d_linear(...): project 3D camera-space points onto the image plane with Human3.6M intrinsics; the first includes radial/tangential distortion, the second uses only focal length & principal point.
-
-Relies on helpers from common.utils.wrap and quaternion ops qrot/qinverse
-
-How it ties into the bigger picture:
-
-Preprocessing: 2D detections are normalized per camera before entering PoseFormerV2 (so the model sees a consistent scale across videos).
-
-Label prep: Ground-truth 3D is converted between world/camera coordinates; global trajectory can be removed/added as needed.
-
-Evaluation & viz: After predicting 3D, you may re-apply trajectory, convert camera→world, and/or project back to 2D for overlays or metric computations that need camera geometry. These steps are crucial for fair, apples-to-apples metrics like MPJPE and for producing clean renderings
-
-custom_dataset.py:
-What I see
-
-Defines a CustomDataset class that inherits from MocapDataset. It’s meant for running PoseFormerV2 on your own 2D detections (not Human3.6M).
-
-Loads a .npz file of detections (expects metadata.video_metadata for per-video width/height).
-
-Builds a per-video camera dict (resolution from metadata + fixed “dummy” extrinsics borrowed from H36M, just to make visualization work).
-
-Optionally reduces the skeleton from 32→17 joints and fixes shoulder parent links—this matches the training/eval joint set PoseFormerV2 expects.
-
-How it fits the bigger picture
-
-When you run with a dataset name starting with custom..., PoseFormerV2 uses this class to create the internal structure the rest of the code expects: subjects/videos → cameras → 2D keypoints (+ optional 3D if you had it).
-
-The “dummy” camera parameters allow you to normalize 2D and render predictions even if your real extrinsics are unknown. This keeps the model I/O format consistent with H36M
-
-generators.py:
-What I see
-
-ChunkedGenerator: the training-time batcher.
-
-Slices long sequences into fixed-length chunks (with padding) matching the model’s temporal window (receptive field).
-
-Supports optional horizontal flip augmentation for 2D and 3D (and flips camera distortion signs).
-
-Yields mini-batches of (cameras?, 3D?, 2D) depending on supervision mode.
-
-UnchunkedGenerator: the testing/visualization-time iterator.
-
-Returns full sequences (batch size 1), with appropriate padding and optional mirrored copies if augmentation is enabled.
-
-Both ensure left/right keypoint & joint indices are swapped correctly during flips.
-
-How it fits the bigger picture
-
-These generators are the bridge between raw arrays and the model: they prepare exactly the windows the transformer expects (e.g., 27/81 frames), keep temporal context aligned, and handle padding so edge frames still produce outputs.
-
-During evaluation, UnchunkedGenerator lets the code run TTA (flip + average) cleanly, which improves MPJPE metrics a bit without retraining
-
-h36m_dataset.py:
-What I see
-
-Declares the Human3.6M skeleton (parents + left/right joint lists).
-
-Hard-codes intrinsic params for the 4 H36M cameras and extrinsic (orientation quaternion + translation) per subject.
-
-The Human36mDataset class:
-
-Loads 3D poses from data_3d_h36m.npz into the internal dict structure.
-
-Normalizes camera intrinsics to the coordinate system used across the repo (centers scaled to ~[-1, 1], focal scaled by image width, translations mm→meters).
-
-Builds an “intrinsic vector” with focal, center, distortion, and a 3×3 projection-like set flattened—handy for downstream math.
-
-Optionally reduces to 17 joints and fixes shoulder parents to match the common 17-joint layout.
-
-Indicates it supports semi-supervised setups.
-How it fits the bigger picture
-
-This is the canonical benchmark dataset used to train/evaluate PoseFormerV2 (and to report MPJPE/P-MPJPE/N-MPJPE).
-
-The consistent camera normalization here is why the rest of the code can safely do things like normalize 2D, convert world↔camera, and render with correct geometry for H36M.
-
-Its structure (subjects → actions → cameras & positions) is mirrored by the CustomDataset, which keeps the whole codebase modular and dataset-agnostic.
-
-How they work together (quick map)
-
-Choose dataset via args → Human36mDataset for H36M or CustomDataset for your own 2D.
-
-Generators take those arrays (2D, optional 3D, camera vectors) and deliver the right windowed batches to PoseFormerV2 during training/eval, including flip augmentation.
-
-The model + losses run on these batches; evaluation/visualization rely on the same camera normalization and skeleton conventions defined in the dataset classes.
-
-quaternion.py:
-What’s inside (plain English):
-
-qrot(q, v): rotates 3-D vectors v by quaternion(s) q. Works in batch, assumes q is shaped (*, 4) and v is (*, 3). Uses two cross-products to apply the rotation.
-
-qinverse(q, inplace=False): returns the inverse of a unit quaternion by negating its vector part; supports in-place.
-In addition to existing qrot and qinverse, now provides:
-quat_normalize, quat_dot, quat_slerp, quat_from_rotmat, rotmat_from_quat, basis_from_quat.
-Torch-native, batch-safe, wxyz convention. Used by orientation.py and available to camera/visualization utilities.
-
-
-How it ties into the bigger picture:
-
-These are the low-level math ops used by camera utilities (e.g., world↔camera transforms) when preparing data and during visualization/evaluation. Without correct quaternion rotation/inversion, 3D joints can’t be reliably moved between coordinate frames. This keeps geometry consistent across training, testing, and rendering.
-
-model_poseformer.py (PoseFormerV2):
-What’s inside (plain English):
-
-Building blocks:
-
-Mlp: 2-layer feed-forward with GELU + dropout (standard transformer MLP).
-
-FreqMlp: same idea, but runs in the temporal frequency domain—applies DCT → MLP → iDCT to model temporal patterns.
-
-Attention: multi-head self-attention (QKV projection, scaled dot-product, dropout).
-
-Block: norm → attention → residual + norm → MLP → residual (standard ViT block).
-
-MixedBlock: splits the sequence along time into two halves:
-
-first half → standard Mlp,
-
-second half → FreqMlp (DCT/iDCT path),
-then concatenates back—mixing time-domain and frequency-domain processing.
-
-Uses DropPath (stochastic depth) for regularization.
-
-PoseTransformerV2 (the model):
-
-Inputs: a clip of f frames × p joints × 2 channels (x,y).
-
-Spatial embedding: per-joint linear Joint_embedding (2→embed_dim_ratio) + learned spatial positional embedding; passes through a stack of spatial Blocks and flattens across joints.
-
-Temporal/frequency embedding: applies DCT across time, keeps only num_coeff_kept coefficients, linears to embed_dim, adds learned temporal positional embeddings.
-
-Fusion: concatenates the frequency branch with the spatial feature sequence, then runs a stack of MixedBlocks (half time-domain, half frequency-domain MLP).
-
-Aggregation: “weighted mean” via 1×1 Conv over kept coefficients and kept frames (two small convs) to compress the temporal dimension.
-
-Head: LayerNorm → Linear → reshape to (B, 1, joints, 3) (predicts 3-D xyz per joint).
-
-Model sizes and depths are driven by CLI args like embed_dim_ratio, depth, number_of_kept_frames, number_of_kept_coeffs.
-
-How it ties into the bigger picture:
-
-This is the core network that turns normalized 2-D keypoint tracks into 3-D joint coordinates.
-
-It explicitly separates and then fuses spatial structure (relations across joints) and temporal structure (both in time and frequency), which is why PoseFormerV2 is strong on motion consistency.
-
-Upstream pieces (datasets, camera transforms, generators) deliver correctly shaped, normalized windows; downstream pieces (losses/metrics, visualization) evaluate and display the 3-D outputs. The CLI args (from arguments.py) configure these internal sizes and depths so training/eval scripts can reuse the same model cleanly.
-
-skeleton.py:
-What it contains (simple):
-
-A Skeleton class that stores the kinematic tree: parents array, and lists of left/right joints.
-
-Utilities to query structure (num_joints, parents, children, has_children) and to remove joints safely while fixing indices and left/right groupings. It also precomputes children lists for fast traversal.
-
-How it fits in:
-
-The skeleton definition is the canonical joint graph used across training, evaluation, and visualization.
-
-Rendering uses parents()/left-right splits for coloring and drawing bone lines; metrics and flips also depend on consistent left/right joint indexing.
-
-utils.py:
-What it contains (simple):
-
-wrap(func, *args, unsqueeze=False): lets you call a PyTorch function using NumPy arrays; converts inputs to tensors and outputs back to NumPy—handy glue code.
-
-deterministic_random(min_value, max_value, data): SHA-256–based pseudo-random integer for repeatable sampling/slicing (same input → same selection).
-
-load_pretrained_weights(model, checkpoint): loads weights into a non-DataParallel model, ignoring mismatched keys/shapes and stripping any module. prefixes from saved state dicts. Prints how many layers matched.
-
-How it fits in:
-
-wrap is used by camera/geo helpers so they can accept NumPy without boilerplate.
-
-deterministic_random ensures reproducible subset or window picks when downsampling.
-
-load_pretrained_weights is a robust loader for checkpoints across different wrapping (DP vs non-DP) or minor architecture diffs.
-
-visualization.py:
-What it contains (simple):
-
-A Matplotlib/FFmpeg-based renderer for side-by-side 2D input and 3D pose animation.
-
-Helpers to probe video metadata via ffprobe (get_resolution, get_fps) and to stream frames with ffmpeg (read_video).
-
-render_animation(...): builds a figure with the input frame and one or more 3D subplots (e.g., “Reconstruction”, “Ground truth”), colors right-side joints red, draws bones using the skeleton parents(), handles downsampling, TTA-compatible sequence alignment, and writes .mp4 (ffmpeg) or .gif (imagemagick). Uses trajectory to keep the camera centered on the subject per frame.
-
-How it fits in:
-
-This is the final qualitative output stage. After the model predicts 3D in camera/world coordinates, the training/eval script passes normalized 2D keypoints, 3D predictions (and optional GT), the Skeleton, FPS, and viewport to render_animation to create the comparison video. It relies on the same skeleton structure and camera normalization used in preprocessing.
-
-Big-picture wiring (at a glance)
-
-Datasets provide joints & cameras → generators window the sequences → model predicts 3D → loss/metrics score them → visualization draws them using the skeleton parents and left/right indices.
-
-Utils keep conversions clean (NumPy↔Torch), selections reproducible, and checkpoint loading resilient.
-
+Project Structure (Methodology-Relevant View)
+
+Project Root:
+C:\Users\ppk_2\Desktop\University\SummerSem-25\Human_Pose_Estimate\PoseFormerV2_latest
+
+├── checkpoint/
+│   └── 27_243_45.2.bin                          # PoseFormerV2 pretrained checkpoint used by demo/vis.py
+│
+├── common/
+│   ├── arguments.py                             # Global CLI flags (training/eval/viz); repo-wide configuration
+│   ├── camera.py                                # 2D normalization + world↔camera transforms + 3D→2D projection
+│   ├── custom_dataset.py                        # Wraps “your video” detections into dataset API (dummy camera for viz)
+│   ├── generators.py                            # Windowing/batching (Chunked/UnchunkedGenerator)
+│   ├── h36m_dataset.py                          # Human3.6M skeleton + camera params + dataset loader
+│   ├── loss.py                                  # MPJPE variants / training losses
+│   ├── mocap_dataset.py                         # Base dataset API
+│   ├── model_poseformer.py                      # PoseFormerV2 model (PoseTransformerV2, MixedBlock, DCT tokens)
+│   ├── orientation.py                           # Torso-based orientation quaternion from 3D skeleton (+ smoothing)
+│   ├── quaternion.py                            # Quaternion math toolbox (qrot, qinverse, slerp, rotmat↔quat, etc.)
+│   ├── skeleton.py                              # Kinematic tree + joint removal + left/right bookkeeping
+│   ├── utils.py                                 # wrap(), checkpoint loading helpers, deterministic random, etc.
+│   └── visualization.py                         # Render animation utilities (matplotlib/ffmpeg pipeline)
+│
+├── demo/
+│   ├── vis.py                                   # MAIN demo: video/image → 2D (HRNet) → 3D (PoseFormerV2) → outputs/logs
+│   ├── replay_pose.py                           # Replay pose_stamped.log back into ROS (PoseStamped/TF/Markers)
+│   ├── export_rgbd_from_bag.py                  # Export paired color+depth PNGs from rosbag (timestamp-nearest pairing)
+│   ├── output/                                  # Where vis.py writes results (input_2D/, pose2D/, pose3D/, pose/, logs)
+│   ├── image/                                   # Demo images / depth dirs (often referenced by vis.py defaults)
+│   ├── video/                                   # Demo videos (and optionally pipeline helper scripts in your fork)
+│   └── lib/
+│       ├── preprocess.py                        # COCO-17 → H36M-17 mapping + synthetic torso joints + keypoint repair
+│       ├── hrnet/
+│       │   └── gen_kpts.py                      # YOLO→SORT→HRNet: generate 2D keypoints over a video
+│       └── yolov3/
+│           ├── darknet.py                       # Darknet cfg parser + YOLOv3 PyTorch model + .weights loader
+│           └── human_detector.py                # “Person only” detector wrapper + NMS + box rescaling
+│
+├── run_poseformer.py                            # Main train/eval script (H36M/MPI datasets, metrics, checkpointing)
+├── mpi_inf_3dhp/                                # MPI-INF-3DHP dataset support (if used)
+├── single_frame.ipynb                           # Notebook convenience
+├── file_info.txt                                # (this file)
+├── requirements.txt
+└── README.md
+
+
+======================================================================
+0) End-to-End Methodology Overview (what your system does)
+======================================================================
+
+Your project’s practical pipeline (the demo/ workflow) is:
+
+(ROS bag)
+  └─ demo/export_rgbd_from_bag.py
+       → color PNG sequence + depth PNG sequence (aligned by nearest timestamp)
+
+(color frames)
+  └─ demo/lib/hrnet/gen_kpts.py
+       YOLOv3 person detection → SORT tracking → HRNet keypoints
+       → 2D joints (COCO-17) + per-joint confidence over time
+
+(2D joints)
+  └─ demo/lib/preprocess.py
+       COCO-17 → H36M-17 joint mapping + synthetic torso joints + low-conf joint repair
+       → stable 2D tracks in the joint layout PoseFormer expects
+
+(2D tracks, normalized)
+  └─ demo/vis.py + common/camera.py
+       normalize_screen_coordinates() + test-time flip augmentation
+       → PoseFormerV2 inference (common/model_poseformer.py)
+       → 3D joints (camera frame)
+
+(3D joints)
+  └─ common/orientation.py + common/quaternion.py
+       torso coordinate frame → quaternion (wxyz) + confidence
+       optional SLERP smoothing (temporal)
+
+(Optional) metric translation (depth)
+  └─ demo/vis.py
+       pelvis pixel (u,v) + depth(u,v) + intrinsics (fx,fy,cx,cy)
+       → backproject to (X,Y,Z) meters in camera frame
+
+Outputs (for report + ROS)
+  ├─ Visualization frames/videos (pose2D/ pose3D/ composite)
+  ├─ input_2D/keypoints.npz  (reconstruction + valid_mask)
+  ├─ pose_stamped.log        (per-frame pose + status + translation source)
+  └─ demo/replay_pose.py republishes pose_stamped.log into ROS topics
+
+
+======================================================================
+1) demo/export_rgbd_from_bag.py  — RGB-D extraction from ROS bag
+======================================================================
+
+Purpose:
+- Convert a rosbag into a dataset-like folder structure of *paired* RGB and depth images.
+
+Core idea:
+- Color and depth messages have different timestamps.
+- Maintain buffers Qc, Qd and match by nearest timestamp within tolerance.
+
+Key mechanics:
+- Read rosbag messages for color_topic + depth_topic within [start, end].
+- On each new message:
+    try match nearest timestamp in the other buffer within ±time_tol
+    if match -> save both as the same index
+- If no match -> push into that topic’s queue
+- Keeps queue bounded (prevents memory blow-up)
+- Supports:
+    --start-secs, --duration
+    --time-tol
+    --stride (subsample matched pairs)
+    --max-pairs
+    auto-continue indexing (resume exports cleanly)
+
+Outputs:
+- out/color/color_000000.png, ...
+- out/depth/depth_000000.png, ...
+Notes:
+- Depth is stored as 16UC1 PNG (typically raw mm units). Later, vis.py uses depth_scale.
+
+
+======================================================================
+2) demo/lib/yolov3/  — person detection (crop ROI for HRNet)
+======================================================================
+
+2.1) demo/lib/yolov3/darknet.py
+Purpose:
+- Build YOLOv3 model from Darknet .cfg and load Darknet .weights.
+
+Key pieces:
+- parse_cfg(): reads blocks from cfg into dict list
+- create_modules(): compiles blocks into PyTorch nn.ModuleList
+  Supports layer types:
+    convolutional, upsample, maxpool, route (concat), shortcut (residual), yolo
+- Darknet.forward():
+    caches intermediate outputs for route/shortcut
+    concatenates detections from multi-scale YOLO heads
+- load_weights(): reads Darknet binary weights header + layer weights into PyTorch tensors
+
+2.2) demo/lib/yolov3/human_detector.py
+Purpose:
+- Thin wrapper to run YOLOv3 and return “person” bounding boxes + confidences.
+
+Main function:
+- yolo_human_det(img, model=None, reso=416, confidence=...):
+    preprocess image to YOLO input size
+    forward pass → raw detections
+    write_results() applies confidence threshold + NMS
+    rescales boxes back to original image coordinates (undo letterbox)
+    returns:
+      bboxs[K,4] = [x1,y1,x2,y2]
+      scores[K,1]
+
+Role in methodology:
+- Provides a stable person crop window so HRNet keypoint estimation is focused and robust.
+
+
+======================================================================
+3) demo/lib/hrnet/gen_kpts.py  — 2D keypoints over video (YOLO→SORT→HRNet)
+======================================================================
+
+Purpose:
+- Generate 2D keypoints (COCO-17) and confidence scores per frame.
+- Produces arrays shaped to match PoseFormer demo expectations.
+
+Core pipeline per frame:
+1) Read frame (OpenCV)
+2) Detect person bbox with YOLOv3 (human_detector.py)
+   - If YOLO misses: reuse previous bbox (bboxs_pre)
+3) Track bbox with SORT
+   - Provides temporal consistency (reduces jitter / ID swaps)
+4) Crop/normalize person ROI
+5) Run HRNet pose model on crop
+6) Convert HRNet output to pixel-space joints for that frame
+
+Output tensors:
+- keypoints: (M, T, 17, 2)  [M = tracked persons, T = frames]
+- scores:    (M, T, 17)
+
+Important robustness patches (timeline integrity):
+- If a frame cannot be read or no track exists:
+    append zeros for that frame (do NOT skip time)
+  This preserves 1:1 alignment with:
+    - video frames
+    - depth frames
+    - valid_mask
+    - pose logs
+
+Methodology note:
+- This “never skip frames” policy is crucial for synchronized RGB-D + pose pipelines.
+
+
+======================================================================
+4) demo/lib/preprocess.py  — COCO-17 → H36M-17 mapping + cleanup
+======================================================================
+
+Purpose:
+- PoseFormer expects H36M-style 17 joints.
+- HRNet outputs COCO-17.
+- This file transforms, synthesizes missing torso joints, and repairs low-confidence legs.
+
+Key functions:
+- coco_h36m(keypoints):
+    input:  (T, 17, 2) in COCO order (pixels)
+    output: (T, 17, 2) in H36M order + valid_frames indices
+
+    Steps:
+    - Create “virtual” joints (head/thorax/pelvis/spine) using averages of face/shoulders/hips
+    - Copy remaining joints into H36M order via index maps
+    - Apply small empirical alignment tweaks (to match H36M style)
+    - valid_frames = frames where sum(keypoints)!=0
+
+- h36m_coco_format(keypoints, scores):
+    input:  keypoints (N,T,17,2), scores (N,T,17)
+    output: h36m_kpts (N,T,17,2), h36m_scores (N,T,17), valid_frames(list per person)
+
+    Synthesizes confidence for virtual joints using means of contributing joints.
+
+- revise_kpts(h36m_kpts, h36m_scores, valid_frames):
+    Repairs unstable leg joints when score < 0.3
+    Strategy: copy upstream joint positions to maintain plausible skeleton
+    (prevents huge jumps that break temporal modeling)
+
+Methodology role:
+- This is the “format bridge” that makes 2D detections compatible with PoseFormerV2.
+
+
+======================================================================
+5) demo/vis.py  — main demo: 2D → 3D + visualization + logging
+======================================================================
+
+Purpose:
+- Central script that:
+  - runs/get 2D keypoints (via gen_kpts)
+  - normalizes 2D (common/camera.py)
+  - runs PoseFormerV2 3D lifting (common/model_poseformer.py)
+  - renders output images/video
+  - (optional) estimates torso orientation quaternion
+  - (optional) estimates metric translation using depth PNGs + intrinsics
+  - writes logs for ROS replay
+
+Key internal stages (conceptual):
+
+5.1) 2D stage (get_pose2D)
+--------------------------
+Output artifact:
+- demo/output/<run>/input_2D/keypoints.npz
+
+Format (important for chatbot + report):
+- reconstruction: (1, T, 17, 2) float32
+- valid_mask:     (T,) uint8
+    valid_mask[t] = 1 → person present
+    valid_mask[t] = 0 → no person (or missing frame)
+
+Robust fallback behavior:
+- If HRNet/YOLO pipeline fails or no person detected:
+    writes all-zero reconstruction and all-zero valid_mask
+    appends to skip.log explaining the skip
+This guarantees downstream stages don’t crash and T stays consistent.
+
+5.2) 3D stage (get_pose3D)
+--------------------------
+Inputs:
+- input_2D/keypoints.npz
+- raw RGB frames (video or images)
+
+Preprocessing:
+- input_2D_no = (T,17,2) pixel coords
+- normalize_screen_coordinates(X,w,h):
+    Xn = X/w*2 - [1, h/w]
+- Builds a fixed-length temporal window around each frame:
+    window = 243 frames (centered), with edge padding
+- Test-Time Augmentation:
+    - create flipped copy: x *= -1
+    - swap left/right joints
+    - run model on both
+    - unflip 3D back, average outputs
+
+Model inference:
+- Loads PoseFormerV2 checkpoint (27_243_45.2.bin)
+- output_3D: (1, 1, 17, 3) per frame (center frame prediction)
+
+Coordinate conventions (as used in code comments):
+- Camera optical-like frame:
+    x = right
+    y = down
+    z = forward
+
+World transform (for visualization only):
+- camera_to_world(post_out, R=fixed_rot, t=0)
+- then shifts z so min(z)=0 to keep skeleton above “ground”
+
+Missing-person handling:
+- If valid_mask[t]==0:
+    keeps previous 3D pose (prev_post_out) to avoid sudden drops
+    and logs status accordingly
+
+5.3) Orientation estimation (optional)
+--------------------------------------
+Enabled by args.estimate_orientation.
+
+Computed from the predicted 3D skeleton:
+- Uses common/orientation.py:
+    compute_torso_frame(joints_3d, layout={h36m|coco17})
+    returns:
+      quat_wxyz, forward, right, up, confidence
+
+Smoothing:
+- Confidence-gated SLERP-EMA:
+    if confidence < conf_min and prev_quat exists:
+        keep prev_quat (don’t update)
+    else:
+        prev_quat = slerp(prev_quat, cur_quat, alpha)
+
+Outputs:
+- orientation_rows buffer can be saved (CSV/JSON depending on flags)
+- optional 3D triad overlay in rendered pose images
+
+Important design note (current vis.py structure):
+- The metric translation (depth) block is placed inside the orientation-enabled path.
+  Practically: if you want depth translation, keep estimate_orientation enabled.
+
+5.4) Metric translation from depth (optional)
+---------------------------------------------
+Enabled by:
+  --translation-source depth
+and depth inputs:
+  --depth-path (image mode) OR --depth-dir + --depth-pattern (video/folder inference)
+
+Computation:
+- Choose pelvis/root joint pixel from overlay_2D_px (root_idx=0)
+- Read aligned depth PNG (16UC1)
+- Sample robust median depth in a small window around (u,v)
+- Convert depth to meters:
+    Z = depth_scale * Z_raw
+- Backproject using intrinsics:
+    X = (u - cx)/fx * Z
+    Y = (v - cy)/fy * Z
+    Z = Z
+- pos_xyz_m is “camera-frame translation” in meters
+
+Logs:
+- translation_source: "depth" or "none"
+- note explains missing depth, invalid depth sample, etc.
+
+5.5) PoseStamped log (pose_stamped.log)
+---------------------------------------
+vis.py “stages” per-frame entries and writes one best line per frame (status-ranked).
+
+Fields are designed to be replayable:
+- frame_index
+- has_person
+- t_ms
+- frame_id
+- conf
+- yaw_deg (optional)
+- quat_wxyz (orientation)
+- status (OK / SKIP:... with reason)
+- pos_xyz_m (translation if available)
+- translation_source + note
+
+This log is the input to demo/replay_pose.py.
+
+
+======================================================================
+6) demo/replay_pose.py  — ROS playback of pose_stamped.log
+======================================================================
+
+Purpose:
+- Read pose_stamped.log and republish it as live ROS topics for debugging / integration.
+
+Core behavior (per frame):
+- Parse all lines for that frame index
+- Select the “best” candidate by status priority
+- If best is OK and has translation:
+    publish fresh geometry_msgs/PoseStamped
+- Otherwise:
+    republish last-known-valid pose for up to --stale-timeout-ms (stale hold)
+
+Optional outputs:
+- RViz Marker arrow for orientation
+- TF TransformStamped broadcast (parent frame → child frame)
+
+Always publishes diagnostics:
+- /human_pose_status (std_msgs/String JSON)
+  includes status, confidence, translation_source, age_ms, etc.
+
+Methodology role:
+- Decouples “offline inference/logging” from “online ROS consumption”
+- Lets teammates validate topics/TF in RViz without rerunning PoseFormer.
+
+
+======================================================================
+7) common/model_poseformer.py  — PoseFormerV2 (PoseTransformerV2)
+======================================================================
+
+Purpose:
+- Transformer-based 2D→3D lifting model.
+
+Inputs:
+- x: (B, F, J, 2) normalized 2D joints
+  typical: F=243, J=17
+
+Key ideas:
+1) Spatial modeling across joints (per selected frames)
+2) Temporal modeling via combined:
+    - time-domain tokens (kept frames)
+    - frequency-domain tokens (DCT coefficients)
+3) Fuse both in MixedBlocks, then aggregate → 3D pose
+
+Main components:
+- Joint_embedding: per-joint (2 → embed_dim_ratio)
+- Spatial_pos_embed: learned (J tokens)
+- Temporal DCT path:
+    DCT across time → keep first Kc coeffs → embed → Temporal_pos_embed_
+- MixedBlock:
+    attention + split MLP:
+      half sequence uses normal MLP
+      half uses FreqMlp (DCT→MLP→iDCT)
+- Weighted pooling:
+    Conv1d over tokens to learn weighted mean for:
+      frequency tokens and spatial tokens
+- Head:
+    Linear → (3J) → reshape to (B,1,J,3)
+
+Output:
+- 3D joints (relative), one pose per center frame
+
+
+======================================================================
+8) common/orientation.py + common/quaternion.py  — orientation + quaternion math
+======================================================================
+
+common/orientation.py
+Purpose:
+- Infer torso orientation from a 3D skeleton.
+
+How:
+- Use hips + shoulders to build torso axes:
+    up      = normalize(spine - pelvis)
+    right   = normalize(RShoulder - LShoulder)
+    forward = normalize(cross(up, right))
+    up      = normalize(cross(right, forward))
+- Build rotation matrix [right | up | forward]
+- Convert to quaternion (wxyz)
+
+Returns:
+- quat_wxyz
+- basis vectors (forward/right/up)
+- confidence score
+- smooth_quat(prev,cur,alpha) uses SLERP
+
+common/quaternion.py
+Purpose:
+- Torch-native quaternion ops used by camera/orientation:
+    qrot, qinverse,
+    quat_normalize, quat_dot, quat_slerp,
+    quat_from_rotmat, rotmat_from_quat, basis_from_quat
+Convention:
+- quaternions are wxyz throughout this repo (be careful when writing to ROS messages)
+
+
+======================================================================
+9) common/camera.py  — geometry + normalization + projection
+======================================================================
+
+Key functions (used by demo + training/eval):
+- normalize_screen_coordinates(X,w,h):
+    maps pixel coords to normalized coords (aspect-aware)
+- image_coordinates(X,w,h):
+    inverse mapping
+- world_to_camera(X,R,t), camera_to_world(X,R,t):
+    uses qrot/qinverse
+- project_to_2d(X, cam_params):
+    full H36M projection with radial/tangential distortion
+- project_to_2d_linear(X, cam_params):
+    simple pinhole projection (no distortion)
+
+
+======================================================================
+10) common/h36m_dataset.py + common/custom_dataset.py  — datasets + cameras
+======================================================================
+
+common/h36m_dataset.py
+- Defines H36M skeleton + camera intrinsics/extrinsics
+- Loads positions_3d sequences from .npz
+- Normalizes intrinsics into the repo’s standard format
+- Optionally reduces 32 joints → 17 joints (PoseFormer convention)
+
+common/custom_dataset.py
+- Wraps “your detections” into dataset API:
+    loads detections npz metadata.video_metadata[video] = {w,h}
+- Creates per-video camera dict using resolution + dummy H36M-like extrinsics
+  (explicitly “only for visualization purposes”)
+- Optionally reduces skeleton 32 → 17 and rewires shoulders
+
+
+======================================================================
+11) Key data contracts (super important for report + future chats)
+======================================================================
+
+A) keypoints.npz written by demo/vis.py
+---------------------------------------
+Path:
+  demo/output/<run>/input_2D/keypoints.npz
+
+Fields:
+- reconstruction: float32 (1, T, 17, 2)
+- valid_mask:     uint8   (T,)
+
+Semantics:
+- reconstruction[0,t,j] = (u_px, v_px) in pixel coordinates
+- valid_mask[t] = 1 when person exists in that frame
+- valid_mask[t] = 0 means “no person / failed frame”; pipeline keeps time alignment
+
+B) PoseFormer input (after normalization + windowing)
+-----------------------------------------------------
+- normalized 2D: (T,17,2)
+- temporal window: (243,17,2) per target frame
+- augmentation: non-flip + flip, then average 3D
+
+C) PoseFormer output (demo usage)
+---------------------------------
+- output_3D for a frame: (17,3) in camera frame (x right, y down, z forward)
+- then optionally transformed to a dummy world frame for visualization
+
+D) Orientation output
+---------------------
+- quaternion wxyz
+- used for:
+    logs (pose_stamped.log)
+    RViz marker orientation
+    TF broadcast (after converting to ROS xyzw)
+
+E) Depth translation
+--------------------
+Inputs:
+- aligned depth PNG (16UC1)
+- intrinsics fx,fy,cx,cy
+- root pixel (u,v) from 2D overlay
+
+Output:
+- pos_xyz_m = (X,Y,Z) meters in camera frame
+
+
+======================================================================
+12) “How it wires together” (one-glance map)
+======================================================================
+
+(rosbag) → export_rgbd_from_bag.py → RGB frames + aligned depth frames
+RGB frames → gen_kpts.py → COCO 2D joints + scores
+COCO joints → preprocess.py → H36M 2D joints (stable)
+H36M 2D joints → camera.normalize_screen_coordinates → PoseFormerV2 (model_poseformer.py) → 3D joints
+3D joints → orientation.py/quaternion.py → torso quaternion (+ smoothing)
+(2D pelvis pixel + depth + intrinsics) → vis.py backprojection → metric translation
+(orientation + translation) → vis.py pose_stamped.log → replay_pose.py → ROS PoseStamped/TF/Marker
+
+
+======================================================================
+13) Practical notes / gotchas (include these in methodology as “implementation details”)
+======================================================================
+
+- Timeline integrity:
+  gen_kpts.py and vis.py intentionally avoid “dropping frames”.
+  Missing detections are represented via valid_mask=0 and/or held-last-pose.
+
+- Quaternion convention mismatch:
+  Repo uses wxyz internally.
+  ROS messages use xyzw. You must reorder when publishing.
+
+- CustomDataset dummy camera:
+  custom_dataset.py uses H36M-like extrinsics only for visualization; not true calibration.
+
+- Depth translation depends on aligned depth:
+  export_rgbd_from_bag.py produces paired frames by nearest timestamp.
+  If your depth stream is not aligned to color (e.g., different optical centers), you need alignment upstream.
+
+- Depth units:
+  Most RealSense-like sources store depth in mm in a 16UC1 image.
+  vis.py uses depth_scale (default often 0.001) to convert to meters.
+
+- Translation-source placement in vis.py:
+  Depth translation block sits inside the orientation-enabled path in current vis.py structure.
+  For “depth translation only”, keep orientation estimation enabled (even if you don’t save it).
+
+
+======================================================================
+References (internal to repo / pipeline)
+======================================================================
+- PoseFormerV2 core model: common/model_poseformer.py
+- Camera geometry utilities: common/camera.py
+- Orientation/quaternion utilities: common/orientation.py, common/quaternion.py
+- 2D pipeline: demo/lib/hrnet/gen_kpts.py + demo/lib/yolov3/*
+- COCO→H36M conversion: demo/lib/preprocess.py
+- Demo runner + logging: demo/vis.py
+- ROS replay: demo/replay_pose.py
+- ROS bag export: demo/export_rgbd_from_bag.py

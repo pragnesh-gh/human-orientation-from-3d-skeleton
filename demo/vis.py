@@ -1071,6 +1071,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                     # --- Intrinsics & scale (defaults already on argparse) ---
                     fx, fy = float(args.fx), float(args.fy)
                     cx, cy = float(args.cx), float(args.cy)
+
                     depth_scale = float(getattr(args, "depth_scale", 0.001))
 
                     # --- Resolve the aligned depth PNG for THIS color frame ---
