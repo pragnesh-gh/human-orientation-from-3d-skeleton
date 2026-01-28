@@ -190,27 +190,29 @@ _ros_pose_pub = None
 _ros_diag_pub = None
 _marker_pub = None
 _tf_broadcaster = None
+_rospy = None  # set by _try_init_ros() when running in ROS
 
-if _ros_ready:
-    if getattr(args, "publish_marker", False) and _ROS_VIZ_OK:
-        marker_pub = rospy.Publisher(args.marker_topic, Marker, queue_size=10)
-    elif getattr(args, "publish_marker", False) and not _ROS_VIZ_OK:
-        print("[ROS.VIZ] visualization_msgs not available; skipping Marker publisher.")
-
-    if getattr(args, "publish_tf", False) and _ROS_VIZ_OK:
-        tf_broadcaster = tf2_ros.TransformBroadcaster()
-    elif getattr(args, "publish_tf", False) and not _ROS_VIZ_OK:
-        print("[ROS.VIZ] tf2_ros not available; skipping TF broadcaster.")
+# if _ros_ready:
+#     if getattr(args, "publish_marker", False) and _ROS_VIZ_OK:
+#         marker_pub = rospy.Publisher(args.marker_topic, Marker, queue_size=10)
+#     elif getattr(args, "publish_marker", False) and not _ROS_VIZ_OK:
+#         print("[ROS.VIZ] visualization_msgs not available; skipping Marker publisher.")
+#
+#     if getattr(args, "publish_tf", False) and _ROS_VIZ_OK:
+#         tf_broadcaster = tf2_ros.TransformBroadcaster()
+#     elif getattr(args, "publish_tf", False) and not _ROS_VIZ_OK:
+#         print("[ROS.VIZ] tf2_ros not available; skipping TF broadcaster.")
 
 
 def _try_init_ros(args):
-    global _ros_ready, _ros_pose_pub, _ros_diag_pub, _marker_pub, _tf_broadcaster
+    global _ros_ready, _ros_pose_pub, _ros_diag_pub, _marker_pub, _tf_broadcaster, _rospy
     if _ros_ready:
         return
     if not getattr(args, "ros_publish", False):
         return
     try:
         import rospy
+        _rospy = rospy
         from geometry_msgs.msg import PoseStamped
         from std_msgs.msg import String
         if not rospy.core.is_initialized():
@@ -231,6 +233,7 @@ def _publish_ros_pose(frame_id, pos, quat, stamp_now=True):
         return
     try:
         import rospy
+        _rospy = rospy
         from geometry_msgs.msg import PoseStamped
         msg = PoseStamped()
         msg.header.frame_id = frame_id
@@ -263,7 +266,7 @@ def _emit_diag_console(diag_dict):
 def _make_marker(frame_id, pos, quat_wxyz, ns="human_pose", mid=1, scale=0.1):
     m = Marker()
     m.header.frame_id = frame_id
-    m.header.stamp = rospy.Time.now()
+    m.header.stamp = _rospy.Time.now()
     m.ns = ns
     m.id = mid
     m.type = Marker.ARROW
@@ -282,7 +285,7 @@ def _make_marker(frame_id, pos, quat_wxyz, ns="human_pose", mid=1, scale=0.1):
 
 def _send_tf(tf_broadcaster, parent_frame, child_frame, pos, quat_wxyz):
     t = TransformStamped()
-    t.header.stamp = rospy.Time.now()
+    t.header.stamp = _rospy.Time.now()
     t.header.frame_id = parent_frame
     t.child_frame_id = child_frame
     t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = pos
@@ -296,16 +299,31 @@ def _send_tf(tf_broadcaster, parent_frame, child_frame, pos, quat_wxyz):
 
 
 sys.path.append(os.getcwd())
-from common.model_poseformer import PoseTransformerV2 as Model
-from common.camera import *
-from common.camera import normalize_screen_coordinates  # for 2D norm (w,h) → [-1,1]
-from common.generators import UnchunkedGenerator       # to handle padding/windowing
 
-import matplotlib
+from common.camera import *
+from common.model import *
+from common.loss import *
+
+from time import time
+from common.utils import *
+from common.visualization import *
+from common.quaternion import *
+from common.orientation import compute_torso_frame, smooth_quat
+from common.camera import normalize_screen_coordinates # for 2D norm (w,h) → [-1,1]
+from common.model_poseformer import PoseTransformerV2 as Model
+from common.generators import UnchunkedGenerator       # to handle padding/windowing
 import matplotlib.pyplot as plt 
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.gridspec as gridspec
 
+
+
+# make sure output folders exist before writing
+def _ensure_output_dirs(output_dir: str):
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "pose2D"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "pose3D"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "pose"), exist_ok=True)
 
 
 plt.switch_backend('agg')
@@ -374,34 +392,6 @@ def show3Dpose(vals, ax):
     ax.tick_params('y', labelleft = False)
     ax.tick_params('z', labelleft = False)
 
-
-# def get_pose2D(source_path, output_dir):
-#     # cap = cv2.VideoCapture(video_path)
-#     # width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-#     # height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-#
-#     print('\nGenerating 2D pose...')
-#
-#
-#     #importing here because its classing with the arg parse with image.
-#     saved_argv = sys.argv
-#     try:
-#         sys.argv = [saved_argv[0]]  # strip all external CLI flags
-#         from lib.hrnet.gen_kpts import gen_video_kpts as hrnet_pose
-#     finally:
-#         sys.argv = saved_argv
-#
-#     keypoints, scores = hrnet_pose(source_path, det_dim=416, num_peroson=1, gen_output=True)
-#     keypoints, scores, valid_frames = h36m_coco_format(keypoints, scores)
-#     re_kpts = revise_kpts(keypoints, scores, valid_frames)
-#     print('Generating 2D pose successful!')
-#
-#     output_dir += 'input_2D/'
-#     os.makedirs(output_dir, exist_ok=True)
-#
-#     output_npz = output_dir + 'keypoints.npz'
-#     np.savez_compressed(output_npz, reconstruction=keypoints)
-
 def img2video(video_path, output_dir):
     _dbg("Entering img2video", video_path=video_path, output_dir=output_dir)
     cap = cv2.VideoCapture(video_path)
@@ -435,7 +425,6 @@ def img2video(video_path, output_dir):
 
 def get_pose2D(source_path, output_dir):
     _dbg("Entering get_pose2D", source_path=source_path, output_dir=output_dir)
-
     print('\nGenerating 2D pose...')
 
     # --- Shield HRNet import from our CLI flags ---
@@ -544,6 +533,7 @@ def get_pose2D(source_path, output_dir):
 
 
 
+
 def showimage(ax, img):
     ax.set_xticks([])
     ax.set_yticks([]) 
@@ -593,13 +583,20 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
     args.n_joints, args.out_joints = 17, 17
 
     # Output folders
-    output_dir_2D = os.path.join(output_dir, "pose2D/")
-    output_dir_3D = os.path.join(output_dir, "pose3D/")
+    output_dir_2D = os.path.join(output_dir, "pose2D/") + os.sep
+    output_dir_3D = os.path.join(output_dir, "pose3D/") + os.sep
     os.makedirs(output_dir_2D, exist_ok=True)
     os.makedirs(output_dir_3D, exist_ok=True)
 
     # ----------------------------
-    # 1) Load model (strict load)
+    # 1) Load 2D inputs (+ valid_mask if present)
+    # ----------------------------
+    _npz = np.load(output_dir + 'input_2D/keypoints.npz', allow_pickle=True)
+    keypoints = _npz['reconstruction']                                                  # shape ~ (M=1, T, 17, 2) in pixels
+    valid_mask = _npz['valid_mask'] if 'valid_mask' in _npz.files else None             # (T,) 1=person present
+
+    # ----------------------------
+    # 2) Load model (strict load)
     # ---------------------------
     ## Reload
     model = nn.DataParallel(Model(args=args)).cuda()
@@ -611,49 +608,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
 
 
     # ----------------------------
-    # 2) Load 2D inputs (+ valid_mask if present)
-    # ----------------------------
-    _npz = np.load(output_dir + 'input_2D/keypoints.npz', allow_pickle=True)
-    keypoints = _npz['reconstruction']                                                  # shape ~ (M=1, T, 17, 2) in pixels
-    valid_mask = _npz['valid_mask'] if 'valid_mask' in _npz.files else None             # (T,) 1=person present
-
-
-    # --- Logging priority helper: choose one line per frame ---
-      # Higher number = higher priority when choosing the single line to emit
-    _STATUS_RANK = {
-            "OK": 5,
-            "SKIP:low_confidence(thresh=": 3,  # prefix match handled below
-            "SKIP:orientation_disabled": 2,
-            "SKIP:no_depth": 1,
-            "SKIP:no_person": 0,
-    }
-
-    def _status_rank(s: str) -> int:
-        if s in _STATUS_RANK:
-            return _STATUS_RANK[s]
-        # Handle dynamic notes like SKIP:low_confidence(thresh=0.50)
-        if s.startswith("SKIP:low_confidence("):
-            return _STATUS_RANK["SKIP:low_confidence(thresh="]
-        return -1
-
-    def _stage_best(best, candidate):
-        """
-            best: dict or None
-            candidate: dict with keys:
-              frame_i, has_person, t_ms, frame_id, conf, yaw_deg, quat_wxyz,
-              status, pos_xyz_m, translation_source, note
-            Returns the better (higher priority) dict.
-        """
-
-        if candidate is None:
-            return best
-        if best is None:
-            return candidate
-        br = _status_rank(best.get("status", ""))
-        cr = _status_rank(candidate.get("status", ""))
-        return candidate if cr > br else best
-    # ----------------------------
-    # 3) Open source (video or image)
+    # 3) Video/image handle
     # ----------------------------
 
     cap = None
@@ -674,8 +629,15 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
 
 
     # ----------------------------
-    # 4) PoseStamped logging (only if enabled)
+    # 4) Orientation state + PoseStamped log
     # ----------------------------
+
+    # --- Orientation buffers (only used if enabled) ---
+    orientation_rows = []
+    prev_quat = None
+    prev_post_out = None  # remember previous 3D pose to hold-through gaps
+    last_quat_for_log = None  # updated whenever we compute orientation (if enabled)
+
     pose_log_fp = None
     pose_log_path = None
     enable_pose_log = bool(getattr(args, "log_pose_stamped", False) or getattr(args, "ros_log_file", None))
@@ -703,18 +665,41 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
         pose_log_fp = _open_pose_log(pose_log_path)  # append-only now
         _dbg("PoseStamped logging enabled", path=pose_log_path)
 
+    # --- Logging priority helper: choose one line per frame ---
+    # Higher number = higher priority when choosing the single line to emit
+    _STATUS_RANK = {
+        "OK": 5,
+        "SKIP:low_confidence(thresh=": 3,  # prefix match handled below
+        "SKIP:orientation_disabled": 2,
+        "SKIP:no_depth": 1,
+        "SKIP:no_person": 0,
+    }
 
+    def _status_rank(s: str) -> int:
+        if s in _STATUS_RANK:
+            return _STATUS_RANK[s]
+        # Handle dynamic notes like SKIP:low_confidence(thresh=0.50)
+        if s.startswith("SKIP:low_confidence("):
+            return _STATUS_RANK["SKIP:low_confidence(thresh="]
+        return -1
 
+    def _stage_best(best, candidate):
+        """
+            best: dict or None
+            candidate: dict with keys:
+              frame_i, has_person, t_ms, frame_id, conf, yaw_deg, quat_wxyz,
+              status, pos_xyz_m, translation_source, note
+            Returns the better (higher priority) dict.
+        """
 
-    # ----------------------------
-    # 5) Runtime state
-    # ----------------------------
-    last_quat_for_log = None  # updated whenever we compute orientation (if enabled)
+        if candidate is None:
+            return best
+        if best is None:
+            return candidate
+        br = _status_rank(best.get("status", ""))
+        cr = _status_rank(candidate.get("status", ""))
+        return candidate if cr > br else best
 
-    # --- Orientation buffers (only used if enabled) ---
-    orientation_rows = []
-    prev_quat = None
-    prev_post_out = None # remember previous 3D pose to hold-through gaps
 
     if POSE_DEBUG:
         kp_T = keypoints.shape[1]
@@ -722,7 +707,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
               f"valid_mask_len={(len(valid_mask) if valid_mask is not None else 'None')}")
 
     # ----------------------------
-    # 6) Frame loop (3D inference)
+    # 5) Frame loop (3D inference)
     # ----------------------------
 
     # --- rolling state used by diagnostics/publish (must exist before the loop) ---
@@ -760,6 +745,9 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
             if valid_mask is not None and i < len(valid_mask):
                 has_person = bool(valid_mask[i]) if i < len(valid_mask) else False # if keypoints shorter than video (should not happen after patch), treat as no person
 
+            # ----------------------------
+            # Build 2D input window
+            # ----------------------------
             # -- Build temporal window [i-pad, i+pad] with edge padding to args.frames
             # T_all = keypoints.shape[1]
             T_all = 1 if is_image else keypoints.shape[1]
@@ -852,6 +840,10 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
             # Shape to (1, 2, 243, 17, 2) for model
             input_2D_stack = np.stack([input_2D, input_2D_aug], axis=0)[np.newaxis, ...]
             input_2D_tensor = torch.from_numpy(input_2D_stack.astype("float32")).cuda()
+
+            # ----------------------------
+            # Run model
+            # ----------------------------
 
             # -- Model forward (non-flip + flip, then unflip & average)
             output_3D_non_flip = model(input_2D_tensor[:, 0])  # [1,1,17,3]
@@ -967,14 +959,16 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                          (float(pos_xyz_m[0]), float(pos_xyz_m[1]), float(pos_xyz_m[2])),
                          (float(prev_quat[0]), float(prev_quat[1]), float(prev_quat[2]), float(prev_quat[3])))
 
-            #############################################################################################
-
-            # -- Write 2D overlay
+            # ----------------------------
+            # Write 2D overlay for this frame
+            # ----------------------------
             image = show2Dpose(overlay_2D_px, copy.deepcopy(img))
             cv2.putText(image, f"frame={i}", (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
             cv2.imwrite(output_dir_2D + f"{i:04d}_2D.png", image)
 
-            # -- Prepare 3D figure (and optional orientation triad)
+            # ----------------------------
+            # Draw 3D pose and optional orientation overlay
+            # ----------------------------
             fig = plt.figure(figsize=(9.6, 5.4))
             gs = gridspec.GridSpec(1, 1)
             gs.update(wspace=-0.00, hspace=0.05)
@@ -1241,7 +1235,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
     print('Generating 3D pose successful!')
 
     # ----------------------------
-    # 7) Optional: save orientation table (CSV/JSON)
+    # 6) Optional: save orientation table (CSV/JSON)
     # ----------------------------
 
     if getattr(args, "estimate_orientation", False) and getattr(args, "orientation_save", None):
@@ -1274,7 +1268,7 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
             print(f"[orientation] Saved JSON: {p}")
 
     # ----------------------------
-    # 8) Compose side-by-side frames (2D | 3D)
+    # 7) Compose side-by-side frames (2D | 3D)
     # ----------------------------
 
     image_2d_dir = sorted(glob.glob(os.path.join(output_dir_2D, '*.png')))
@@ -1496,5 +1490,33 @@ if __name__ == "__main__":
 # python demo/vis.py --image new_test/color_0480.png --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --log-pose-stamped --translation-source depth --depth-path new_test/depth/depth_0480.png --depth-scale 0.001 --fx 911.47 --fy 911.56 --cx 654.27 --cy 366.90
 #For video, use --depth-dir and --depth-pattern instead of --depth-path.
 
-
 # python demo/vis.py --image-dir new_test/color --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --translation-source depth --depth-dir new_test/depth --depth-scale 0.001 --fx 911.47 --fy 911.56 --cx 654.27 --cy 366.90 --log-pose-stamped --orientation-save orientation.csv
+
+# --------------------------------------------------------------------------------------
+# HOW TO RUN (from repo root, i.e., the folder that contains ./demo/)
+#
+# Video mode (writes: pose2D/, pose3D/, pose/, and an output_video.mp4 in the same output dir)
+#   python demo/vis.py --video <video.mp4> --gpu 0
+#
+# Video + torso orientation (also writes per-frame orientation if --orientation-save is given)
+#   python demo/vis.py --video <video.mp4> --gpu 0 --estimate-orientation --orientation-overlay
+#   python demo/vis.py --video <video.mp4> --gpu 0 --estimate-orientation --orientation-save orientation.csv
+#
+# Video + PoseStamped-style log (append-only)
+#   python demo/vis.py --video <video.mp4> --gpu 0 --log-pose-stamped
+#
+# Single image (writes a final <name>.png into the image’s output folder)
+#   python demo/vis.py --image <image.png> --gpu 0
+#
+# Image + depth-based metric translation (aligned depth PNG, 16-bit)
+#   python demo/vis.py --image <color.png> --gpu 0 --estimate-orientation \
+#       --translation-source depth --depth-path <depth.png> --log-pose-stamped
+#
+# Folder of images (processes each image independently)
+#   python demo/vis.py --image-dir <folder> --gpu 0
+#
+# Notes
+# - Output root is fixed to: ./demo/output/<source_name>/
+# - Most arguments already have defaults; run `python demo/vis.py -h` to see them.
+# - For video + depth, use: --depth-dir and --depth-pattern instead of --depth-path.
+# --------------------------------------------------------------------------------------
