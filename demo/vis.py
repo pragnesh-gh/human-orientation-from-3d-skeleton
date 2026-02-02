@@ -182,6 +182,7 @@ _LKV = {
 }
 
 def _now_ms():
+    import time
     return int(time.time() * 1000)
 
 # Lazy ROS init + publishers (only if --ros-publish and ROS is installed)
@@ -301,7 +302,7 @@ def _send_tf(tf_broadcaster, parent_frame, child_frame, pos, quat_wxyz):
 sys.path.append(os.getcwd())
 
 from common.camera import *
-from common.model import *
+# from common.model import *
 from common.loss import *
 
 from time import time
@@ -1487,7 +1488,7 @@ if __name__ == "__main__":
 # python demo/vis.py --video output_video.mp4 --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --log-pose-stamped
 # python demo/vis.py --image frame0141.jpg --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --ros-log-file ./demo/output/frame0141/pose_stamped.log
 
-# python demo/vis.py --image new_test/color_0480.png --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --log-pose-stamped --translation-source depth --depth-path new_test/depth/depth_0480.png --depth-scale 0.001 --fx 911.47 --fy 911.56 --cx 654.27 --cy 366.90
+# python demo/vis.py --image new_test/color/color_0480.png --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --log-pose-stamped --translation-source depth --depth-path new_test/depth/depth_0480.png --depth-scale 0.001 --fx 911.47 --fy 911.56 --cx 654.27 --cy 366.90
 #For video, use --depth-dir and --depth-pattern instead of --depth-path.
 
 # python demo/vis.py --image-dir new_test/color --gpu 0 --estimate-orientation --orientation-overlay --orientation-overlay-scale 1.0 --translation-source depth --depth-dir new_test/depth --depth-scale 0.001 --fx 911.47 --fy 911.56 --cx 654.27 --cy 366.90 --log-pose-stamped --orientation-save orientation.csv
