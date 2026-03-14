@@ -333,6 +333,34 @@ matplotlib.rcParams['ps.fonttype'] = 42
 # suppress warnings while we ALSO properly close figures everywhere
 matplotlib.rcParams['figure.max_open_warning'] = 0
 
+def _keypoints_are_sane(kps, img_w, img_h, min_spread=15, max_oob_frac=0.5):
+    """Return False if the 2D keypoints are clearly unreliable.
+
+    Checks:
+      - all-zero keypoints (placeholder from failed detection)
+      - too many joints outside frame bounds (partial visibility garbage)
+      - joints collapsing to a tiny cluster (near-degenerate detection)
+    """
+    if kps is None or not isinstance(kps, np.ndarray) or kps.size == 0:
+        return False
+    if np.allclose(kps, 0):
+        return False
+    # Joints significantly outside frame bounds
+    margin = 50
+    oob = np.sum(
+        (kps[:, 0] < -margin) | (kps[:, 0] > img_w + margin) |
+        (kps[:, 1] < -margin) | (kps[:, 1] > img_h + margin)
+    )
+    if oob > len(kps) * max_oob_frac:
+        return False
+    # Joints collapsing to a point (very low spatial spread)
+    x_spread = kps[:, 0].max() - kps[:, 0].min()
+    y_spread = kps[:, 1].max() - kps[:, 1].min()
+    if max(x_spread, y_spread) < min_spread:
+        return False
+    return True
+
+
 def show2Dpose(kps, img):
     # Expect a single frame worth of 2D keypoints (17 joints, x/y)
     if not (isinstance(kps, np.ndarray) and kps.shape == (17, 2)):
@@ -741,10 +769,18 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                 fps = float(cap.get(cv2.CAP_PROP_FPS)) or 0.0
                 pos_ms = float(cap.get(cv2.CAP_PROP_POS_MSEC)) if fps > 0 else 0.0
 
-            # -- Person presence (prevents “speed-up” across gaps)
+            # -- Person presence (prevents "speed-up" across gaps)
             has_person = True
             if valid_mask is not None and i < len(valid_mask):
                 has_person = bool(valid_mask[i]) if i < len(valid_mask) else False # if keypoints shorter than video (should not happen after patch), treat as no person
+
+            # -- Quality gate: reject frames where 2D keypoints are garbage
+            if has_person and i < keypoints.shape[1]:
+                frame_kps = keypoints[0, i]
+                if not _keypoints_are_sane(frame_kps, img.shape[1], img.shape[0]):
+                    has_person = False
+                    if POSE_DEBUG:
+                        print(f"[3D.DBG] Frame {i}: keypoints failed quality gate, treating as no_person")
 
             # ----------------------------
             # Build 2D input window
@@ -769,13 +805,27 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                 # Save plain 2D frame (no overlay)
                 cv2.imwrite(output_dir_2D + f"{i:04d}_2D.png", img)
 
-                # Hold last 3D pose or zeros
-                post_out = prev_post_out if prev_post_out is not None else np.zeros((17, 3), dtype=np.float32)
+                # Hold last 3D pose, or show empty axes if no prior pose exists
                 fig = plt.figure(figsize=(9.6, 5.4))
                 gs = gridspec.GridSpec(1, 1)
                 gs.update(wspace=-0.00, hspace=0.05)
                 ax = plt.subplot(gs[0], projection='3d')
-                show3Dpose(post_out, ax)
+                if prev_post_out is not None:
+                    show3Dpose(prev_post_out, ax)
+                else:
+                    # No previous pose yet: empty 3D view (no collapsed skeleton)
+                    ax.view_init(elev=15., azim=70)
+                    ax.set_xlim3d([-0.72, 0.72])
+                    ax.set_ylim3d([-0.72, 0.72])
+                    ax.set_zlim3d([-0.7, 0.7])
+                    ax.set_aspect('auto')
+                    white = (1.0, 1.0, 1.0, 0.0)
+                    ax.xaxis.set_pane_color(white)
+                    ax.yaxis.set_pane_color(white)
+                    ax.zaxis.set_pane_color(white)
+                    ax.tick_params('x', labelbottom=False)
+                    ax.tick_params('y', labelleft=False)
+                    ax.tick_params('z', labelleft=False)
                 output_dir_3D = output_dir + 'pose3D/'
                 os.makedirs(output_dir_3D, exist_ok=True)
                 plt.savefig(output_dir_3D + f"{i:04d}_3D.png", dpi=200, format='png', bbox_inches='tight')
@@ -1506,7 +1556,7 @@ if __name__ == "__main__":
 # Video + PoseStamped-style log (append-only)
 #   python demo/vis.py --video <video.mp4> --gpu 0 --log-pose-stamped
 #
-# Single image (writes a final <name>.png into the image’s output folder)
+# Single image (writes a final <name>.png into the image's output folder)
 #   python demo/vis.py --image <image.png> --gpu 0
 #
 # Image + depth-based metric translation (aligned depth PNG, 16-bit)
