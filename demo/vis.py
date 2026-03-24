@@ -1076,21 +1076,22 @@ def get_pose3D(video_path, output_dir, is_image=False, args=None):
                     radius = max(1e-6, (post_out.max(axis=0) - post_out.min(axis=0)).max() / 2.0)
                     s = float(getattr(args, "orientation_overlay_scale", 1.0)) * radius * 0.2
 
-                    # Draw F (red), R (green), U (blue) in WORLD Space
+                    # Draw F (cyan), R (magenta), U (gold) in WORLD Space
+                    # High-contrast colors that don't clash with red/blue skeleton limbs
                     ax.plot([origin[0], origin[0] + s * fwd_w[0]],
                             [origin[1], origin[1] + s * fwd_w[1]],
-                            [origin[2], origin[2] + s * fwd_w[2]], lw=2, c='r')
+                            [origin[2], origin[2] + s * fwd_w[2]], lw=2, c='#00FFFF')
                     ax.plot([origin[0], origin[0] + s * right_w[0]],
                             [origin[1], origin[1] + s * right_w[1]],
-                            [origin[2], origin[2] + s * right_w[2]], lw=2, c='g')
+                            [origin[2], origin[2] + s * right_w[2]], lw=2, c='#FF00FF')
                     ax.plot([origin[0], origin[0] + s * up_w[0]],
                             [origin[1], origin[1] + s * up_w[1]],
-                            [origin[2], origin[2] + s * up_w[2]], lw=2, c='b')
+                            [origin[2], origin[2] + s * up_w[2]], lw=2, c='#FFD700')
 
                     # add legend once per figure
-                    ax.plot([], [], c='r', label='Forward (Z)')
-                    ax.plot([], [], c='g', label='Right (X)')
-                    ax.plot([], [], c='b', label='Up (Y)')
+                    ax.plot([], [], c='#00FFFF', label='Forward (Z)')
+                    ax.plot([], [], c='#FF00FF', label='Right (X)')
+                    ax.plot([], [], c='#FFD700', label='Up (Y)')
                     ax.legend(loc='upper right')
 
                 # (Optional) store a tidy row for analysis (camera-frame orientation)
